@@ -15,6 +15,8 @@ class Migration(migrations.Migration):
             name="interval_minutes",
             field=models.PositiveIntegerField(
                 blank=True,
+                null=True,
+                default=None,
                 choices=[
                     (1, "Every 1 minute"),
                     (5, "Every 5 minutes"),
@@ -25,9 +27,9 @@ class Migration(migrations.Migration):
                     (120, "Every 2 hours"),
                     (360, "Every 6 hours"),
                     (720, "Every 12 hours"),
+                    (1440, "Every 24 hours"),
                 ],
                 help_text="Interval in minutes (for interval mode)",
-                null=True,
             ),
         ),
     ]
