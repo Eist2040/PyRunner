@@ -4,43 +4,26 @@ services:
     expose:
       - "8000"
     environment:
-      # Coolify auto-fills this with the public URL of the deployment.
-      # The bare token form (no '=value') signals Coolify to generate it.
       - SERVICE_FQDN_PYRUNNER_8000
-
-      # Pin the container listening port so platform-injected PORT values
-      # (some PaaS set PORT=80) cannot override it. Coolify routes Traefik
-      # to this port via SERVICE_FQDN_PYRUNNER_8000.
       - PORT=8000
-
-      # REQUIRED — container will fail to start if these are not set.
-      # See docs/COOLIFY.md for generation commands.
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-
-      # Django
       - DEBUG=False
-      # Coolify's Traefik terminates TLS and forces HTTPS at the edge.
-      # Disabling Django's own SSL redirect avoids redundant 301s and
-      # prevents the in-container HTTP healthcheck from being redirected
-      # into HTTPS it cannot speak (which would mark the backend down).
       - SECURE_SSL_REDIRECT=False
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
-
-      # Email — defaults to console. Configure SMTP/Resend in the app
-      # (Settings -> Email) after first login so magic-link auth works.
       - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
       - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@pyrunner.local}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - USE_RESEND=${USE_RESEND:-False}
-
-      # Workers
       - Q_WORKERS=${Q_WORKERS:-2}
       - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
       - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
     volumes:
       - pyrunner_data:/app/data
+    networks:
+      - default
+      - brain-gateway
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
@@ -52,3 +35,8 @@ services:
 volumes:
   pyrunner_data:
     driver: local
+
+networks:
+  brain-gateway:
+    external: true
+    name: s8cohkt7i0mc089sicj34vlw
