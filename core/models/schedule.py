@@ -24,6 +24,7 @@ class ScriptSchedule(models.Model):
         MONTHLY = "monthly", "Monthly"
 
     class IntervalChoice(models.IntegerChoices):
+        ONE_MINUTE = 1, "Every 1 minute"
         FIVE_MINUTES = 5, "Every 5 minutes"
         TEN_MINUTES = 10, "Every 10 minutes"
         FIFTEEN_MINUTES = 15, "Every 15 minutes"
