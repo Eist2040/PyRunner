@@ -1,42 +1,44 @@
+version: "3.9"
+
 services:
   pyrunner:
-    # ── Tell compose to build locally ─────────────────────────────────────────
-    # 'image:' becomes the TAG for the locally built image.
-    # Compose will build from ./Dockerfile first, then run it.
-    # Pull from registry ONLY happens if you explicitly run:
-    #   docker compose pull
     build:
-      context: .                    # your project root (where Dockerfile lives)
-      dockerfile: Dockerfile        # explicit, no ambiguity
-      args:
-        BUILD_DATE: ${BUILD_DATE:-}
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      context: .
+      dockerfile: Dockerfile
 
-    # Still tag it — useful for pushing to registry later
     image: hasanaboulhasan/pyrunner:latest
 
     restart: unless-stopped
+
+    # IMPORTANT: do NOT use container_name in rolling deployments
+    # Coolify manages container naming automatically
 
     expose:
       - "8000"
 
     environment:
-      - SERVICE_FQDN_PYRUNNER_8000
-      - PORT=8000
-      - SECRET_KEY=${SECRET_KEY}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - DEBUG=False
-      - SECURE_SSL_REDIRECT=False
-      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
-      - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
-      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@pyrunner.local}
-      - RESEND_API_KEY=${RESEND_API_KEY:-}
-      - USE_RESEND=${USE_RESEND:-False}
-      - Q_WORKERS=${Q_WORKERS:-2}
-      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
-      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
-      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
-      - GATEWAY_URL=${GATEWAY_URL:-http://brain-gateway:8001/v1}
+      SERVICE_FQDN_PYRUNNER_8000: ${SERVICE_FQDN_PYRUNNER_8000}
+      PORT: 8000
+
+      SECRET_KEY: ${SECRET_KEY}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+
+      DEBUG: "False"
+      SECURE_SSL_REDIRECT: "False"
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-noreply@pyrunner.local}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      USE_RESEND: ${USE_RESEND:-False}
+
+      Q_WORKERS: ${Q_WORKERS:-2}
+
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+
+      GATEWAY_URL: ${GATEWAY_URL:-http://brain-gateway:8001/v1}
 
     volumes:
       - pyrunner_data:/app/data
@@ -63,12 +65,19 @@ services:
         - "python"
         - "-c"
         - "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
     deploy:
+      replicas: 2   # ✅ ZERO-DOWNTIME: multiple containers
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first   # ✅ Start new container before stopping old
+      restart_policy:
+        condition: on-failure
       resources:
         limits:
           memory: 2048M
