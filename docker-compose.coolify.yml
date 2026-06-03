@@ -1,6 +1,18 @@
+# PyRunner — EliteX Production Compose
+# Network s3030apovq5ycwkh4yp12sif is Brain Gateway's network.
+# When PyRunner is on this network, it reaches Brain Gateway via:
+#   http://brain-gateway:8001
+# This is permanent — survives all redeploys as long as both services
+# declare the same external network.
+#
+# Storage: /opt/elitex/storage is a host bind mount shared with WordPress.
+# WordPress mounts the same path so it can stream downloads directly.
+# GATEWAY_URL secret must be: http://brain-gateway:8001/v1
+
 services:
   pyrunner:
     image: hasanaboulhasan/pyrunner:latest
+    restart: unless-stopped
     expose:
       - "8000"
     environment:
@@ -21,22 +33,41 @@ services:
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
     volumes:
       - pyrunner_data:/app/data
+      # Shared storage — WordPress mounts this same host path to stream downloads
+      # Jobs save ZIPs here. Path in PyRunner scripts: /opt/elitex/storage/jobs/
+      - type: bind
+        source: /opt/elitex/storage
+        target: /opt/elitex/storage
     networks:
-      - default
-      - brain-gateway
-    restart: unless-stopped
+      - default          # Coolify/Traefik routing
+      - brain-gateway    # Brain Gateway AI network
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pyrunner-https.entrypoints=https
+      - traefik.http.routers.pyrunner-https.rule=Host(`pyrunner.elitextools.com`)
+      - traefik.http.routers.pyrunner-https.tls=true
+      - traefik.http.routers.pyrunner-https.tls.certresolver=letsencrypt
+      - traefik.http.services.pyrunner.loadbalancer.server.port=8000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: "2.0"
 
 volumes:
   pyrunner_data:
     driver: local
 
 networks:
+  default:
+    external: true
+    name: ${COOLIFY_NETWORK:-coolify}
   brain-gateway:
     external: true
-    name: s8cohkt7i0mc089sicj34vlw
+    name: s3030apovq5ycwkh4yp12sif
