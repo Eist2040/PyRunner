@@ -1,20 +1,25 @@
-# PyRunner — EliteX Production Compose
-# Network s3030apovq5ycwkh4yp12sif is Brain Gateway's network.
-# When PyRunner is on this network, it reaches Brain Gateway via:
-#   http://brain-gateway:8001
-# This is permanent — survives all redeploys as long as both services
-# declare the same external network.
-#
-# Storage: /opt/elitex/storage is a host bind mount shared with WordPress.
-# WordPress mounts the same path so it can stream downloads directly.
-# GATEWAY_URL secret must be: http://brain-gateway:8001/v1
-
 services:
   pyrunner:
+    # ── Tell compose to build locally ─────────────────────────────────────────
+    # 'image:' becomes the TAG for the locally built image.
+    # Compose will build from ./Dockerfile first, then run it.
+    # Pull from registry ONLY happens if you explicitly run:
+    #   docker compose pull
+    build:
+      context: .                    # your project root (where Dockerfile lives)
+      dockerfile: Dockerfile        # explicit, no ambiguity
+      args:
+        BUILD_DATE: ${BUILD_DATE:-}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+
+    # Still tag it — useful for pushing to registry later
     image: hasanaboulhasan/pyrunner:latest
+
     restart: unless-stopped
+
     expose:
       - "8000"
+
     environment:
       - SERVICE_FQDN_PYRUNNER_8000
       - PORT=8000
@@ -31,16 +36,18 @@ services:
       - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
       - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+      - GATEWAY_URL=${GATEWAY_URL:-http://brain-gateway:8001/v1}
+
     volumes:
       - pyrunner_data:/app/data
-      # Shared storage — WordPress mounts this same host path to stream downloads
-      # Jobs save ZIPs here. Path in PyRunner scripts: /opt/elitex/storage/jobs/
       - type: bind
         source: /opt/elitex/storage
         target: /opt/elitex/storage
+
     networks:
-      - default          # Coolify/Traefik routing
-      - brain-gateway    # Brain Gateway AI network
+      - default
+      - brain-gateway
+
     labels:
       - traefik.enable=true
       - traefik.http.routers.pyrunner-https.entrypoints=https
@@ -48,12 +55,19 @@ services:
       - traefik.http.routers.pyrunner-https.tls=true
       - traefik.http.routers.pyrunner-https.tls.certresolver=letsencrypt
       - traefik.http.services.pyrunner.loadbalancer.server.port=8000
+      - traefik.docker.network=${COOLIFY_NETWORK:-coolify}
+
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+
     deploy:
       resources:
         limits:
@@ -68,6 +82,7 @@ networks:
   default:
     external: true
     name: ${COOLIFY_NETWORK:-coolify}
+
   brain-gateway:
     external: true
     name: s3030apovq5ycwkh4yp12sif
