@@ -7,17 +7,12 @@ services:
       dockerfile: Dockerfile
 
     image: hasanaboulhasan/pyrunner:latest
-
     restart: unless-stopped
-
-    # IMPORTANT: do NOT use container_name in rolling deployments
-    # Coolify manages container naming automatically
 
     expose:
       - "8000"
 
     environment:
-      SERVICE_FQDN_PYRUNNER_8000: ${SERVICE_FQDN_PYRUNNER_8000}
       PORT: 8000
 
       SECRET_KEY: ${SECRET_KEY}
@@ -40,6 +35,9 @@ services:
 
       GATEWAY_URL: ${GATEWAY_URL:-http://brain-gateway:8001/v1}
 
+      # Coolify auto injects these
+      SERVICE_FQDN_PYRUNNER_8000: ${SERVICE_FQDN_PYRUNNER_8000}
+
     volumes:
       - pyrunner_data:/app/data
       - type: bind
@@ -52,36 +50,19 @@ services:
 
     labels:
       - traefik.enable=true
-      - traefik.http.routers.pyrunner-https.entrypoints=https
-      - traefik.http.routers.pyrunner-https.rule=Host(`pyrunner.elitextools.com`)
-      - traefik.http.routers.pyrunner-https.tls=true
-      - traefik.http.routers.pyrunner-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.pyrunner.entrypoints=https
+      - traefik.http.routers.pyrunner.rule=Host(`pyrunner.elitextools.com`)
+      - traefik.http.routers.pyrunner.tls=true
+      - traefik.http.routers.pyrunner.tls.certresolver=letsencrypt
       - traefik.http.services.pyrunner.loadbalancer.server.port=8000
       - traefik.docker.network=${COOLIFY_NETWORK:-coolify}
 
     healthcheck:
-      test:
-        - "CMD"
-        - "python"
-        - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"
-      interval: 20s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
       timeout: 5s
       retries: 5
       start_period: 40s
-
-    deploy:
-      replicas: 2   # ✅ ZERO-DOWNTIME: multiple containers
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first   # ✅ Start new container before stopping old
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          memory: 2048M
-          cpus: "2.0"
 
 volumes:
   pyrunner_data:
