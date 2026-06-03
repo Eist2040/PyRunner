@@ -2,38 +2,49 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DJANGO_SETTINGS_MODULE=pyrunner.settings
+    DJANGO_SETTINGS_MODULE=pyrunner.settings \
+    PORT=8000 \
+    GUNICORN_WORKERS=4 \
+    GUNICORN_THREADS=4 \
+    GUNICORN_TIMEOUT=120 \
+    Q_WORKERS=2
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
 
-# Create data directories
-RUN mkdir -p /app/data/environments /app/data/workdir
+RUN mkdir -p \
+    /app/data/environments \
+    /app/data/workdir \
+    /opt/elitex/storage/jobs \
+    /app/staticfiles
 
-# Collect static files (build-time only keys, not used at runtime)
-ENV SECRET_KEY="build-only-key-not-for-runtime"
-ENV ENCRYPTION_KEY="QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+ENV SECRET_KEY="build-only-key-not-for-runtime" \
+    ENCRYPTION_KEY="QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+
 RUN python manage.py collectstatic --noinput
 
-# Copy and set up entrypoint (convert Windows CRLF to Unix LF)
-COPY entrypoint.sh /entrypoint.sh
-RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+RUN groupadd --gid 1000 appuser \
+    && useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser \
+    && chown -R appuser:appuser /app \
+    && chown -R appuser:appuser /opt/elitex/storage
 
-# Expose port
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER appuser
+
 EXPOSE 8000
 
-# Set entrypoint
+HEALTHCHECK --interval=20s --timeout=5s --retries=5 --start-period=40s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"
+
 ENTRYPOINT ["/entrypoint.sh"]
