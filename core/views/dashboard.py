@@ -5,7 +5,7 @@ from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from django.shortcuts import render
 
-from core.models import Environment, Run, Script
+from core.models import Run, Script
 from core.services.dashboard_service import DashboardService
 from core.services.system_info_service import SystemInfoService
 
@@ -15,14 +15,6 @@ def dashboard_view(request):
     """Main dashboard view with overview statistics."""
     # Get statistics from service
     stats = DashboardService.get_statistics()
-
-    # Legacy counts (for backwards compatibility)
-    runs_count = Run.objects.count()
-    environments_count = Environment.objects.filter(is_active=True).count()
-    success_count = Run.objects.filter(status=Run.Status.SUCCESS).count()
-    failed_count = Run.objects.filter(
-        status__in=[Run.Status.FAILED, Run.Status.TIMEOUT]
-    ).count()
 
     # Recent activity
     recent_runs = Run.objects.select_related("script", "triggered_by").order_by(
@@ -42,14 +34,14 @@ def dashboard_view(request):
         # Statistics cards
         "scripts_count": stats["total_scripts"],
         "active_scripts_count": stats["active_scripts"],
-        "runs_count": runs_count,
+        "runs_count": stats.get("total_runs", 0),
         "runs_today": stats["runs_today"],
         "runs_this_week": stats["runs_this_week"],
         "success_rate": stats["success_rate"],
         "queue_size": stats["queue_size"],
-        "environments_count": environments_count,
-        "success_count": success_count,
-        "failed_count": failed_count,
+        "environments_count": stats.get("environments_count", 0),
+        "success_count": stats.get("success_count", 0),
+        "failed_count": stats.get("failed_count", 0),
         # Recent activity
         "recent_runs": recent_runs,
         "recent_scripts": recent_scripts,
