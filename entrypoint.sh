@@ -135,8 +135,12 @@ echo ""
 
 exec gunicorn pyrunner.wsgi:application \
     --bind 0.0.0.0:${PORT:-8000} \
-    --workers ${GUNICORN_WORKERS:-2} \
+    --workers ${GUNICORN_WORKERS:-4} \
     --threads ${GUNICORN_THREADS:-4} \
     --timeout ${GUNICORN_TIMEOUT:-120} \
+    --graceful-timeout 30 \
+    --keep-alive 5 \
+    --max-requests 1000 \
+    --max-requests-jitter 100 \
     --access-logfile - \
     --error-logfile -
