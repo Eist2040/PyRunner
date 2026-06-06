@@ -41,11 +41,18 @@ class DashboardService:
         total_runs = Run.objects.count()
         runs_today = Run.objects.filter(created_at__date=today).count()
         runs_this_week = Run.objects.filter(created_at__gte=week_ago).count()
+        success_count = Run.objects.filter(status=Run.Status.SUCCESS).count()
+        failed_count = Run.objects.filter(
+            status__in=[Run.Status.FAILED, Run.Status.TIMEOUT]
+        ).count()
+
+        # Environment count
+        from core.models import Environment
+        environments_count = Environment.objects.filter(is_active=True).count()
 
         # Success rate
         success_rate = None
         if total_runs > 0:
-            success_count = Run.objects.filter(status=Run.Status.SUCCESS).count()
             success_rate = round((success_count / total_runs) * 100, 1)
 
         # Queue size
@@ -57,8 +64,12 @@ class DashboardService:
         return {
             "total_scripts": total_scripts,
             "active_scripts": active_scripts,
+            "total_runs": total_runs,
             "runs_today": runs_today,
             "runs_this_week": runs_this_week,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "environments_count": environments_count,
             "success_rate": success_rate,
             "queue_size": queue_size,
         }
