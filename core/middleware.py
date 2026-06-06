@@ -3,11 +3,19 @@ Custom middleware for PyRunner.
 """
 
 import logging
+import time
 
 from django.shortcuts import redirect
 from django.urls import reverse
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for setup state — avoids DB hit on every request.
+# Once setup is complete it never reverts, so we can cache True forever.
+# Cache False (setup needed) briefly to avoid hammering DB during setup flow.
+_SETUP_COMPLETE_CACHE: bool = False
+_SETUP_COMPLETE_CACHE_TIME: float = 0.0
+_SETUP_NEEDED_TTL: float = 5.0  # re-check every 5s while setup is pending
 
 
 class SetupWizardMiddleware:
@@ -68,13 +76,29 @@ class SetupWizardMiddleware:
         return self.get_response(request)
 
     def _is_setup_needed(self) -> bool:
-        """Check if initial setup has been completed."""
+        """Check if initial setup has been completed. Result is cached."""
+        global _SETUP_COMPLETE_CACHE, _SETUP_COMPLETE_CACHE_TIME
+
+        # Once confirmed complete, never re-check (setup doesn't un-complete)
+        if _SETUP_COMPLETE_CACHE:
+            return False
+
+        now = time.monotonic()
+        if (now - _SETUP_COMPLETE_CACHE_TIME) < _SETUP_NEEDED_TTL:
+            # Within TTL and not confirmed complete = still needed
+            return True
+
+        # TTL expired — do the real check
         try:
             from core.services.setup_service import SetupService
-            return SetupService.is_setup_needed()
+            needed = SetupService.is_setup_needed()
+            _SETUP_COMPLETE_CACHE_TIME = now
+            if not needed:
+                _SETUP_COMPLETE_CACHE = True
+            return needed
         except Exception as e:
-            # If we can't check, assume setup is needed
             logger.debug(f"Setup check failed in middleware: {e}")
+            _SETUP_COMPLETE_CACHE_TIME = now
             return True
 
     def _is_admin_setup_needed(self) -> bool:
