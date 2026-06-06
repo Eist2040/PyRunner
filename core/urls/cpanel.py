@@ -19,7 +19,7 @@ from core.views.scripts import (
     webhook_disable_view,
     webhook_regenerate_view,
 )
-from core.views.runs import run_list_view, run_detail_view
+from core.views.runs import run_list_view, run_detail_view, run_clear_view
 from core.views.environments import (
     environment_list_view,
     environment_detail_view,
@@ -137,6 +137,7 @@ urlpatterns = [
 
     # Runs
     path("runs/", run_list_view, name="run_list"),
+    path("runs/clear/", run_clear_view, name="run_clear"),
     path("runs/<uuid:pk>/", run_detail_view, name="run_detail"),
 
     # Tasks
