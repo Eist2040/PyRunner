@@ -5,6 +5,7 @@ System information service for gathering platform and application stats.
 import logging
 import os
 import sys
+import time
 from datetime import timedelta
 from typing import Optional
 
@@ -13,6 +14,11 @@ from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# In-process cache for expensive system metrics (avoids blocking on every request)
+_system_resources_cache: dict = {}
+_system_resources_cache_time: float = 0.0
+_SYSTEM_RESOURCES_TTL = 10.0  # seconds
 
 
 class SystemInfoService:
@@ -240,9 +246,9 @@ class SystemInfoService:
 
     @classmethod
     def get_cpu_usage(cls) -> float:
-        """Get current CPU usage percentage (0-100)."""
+        """Get current CPU usage percentage (0-100). Non-blocking."""
         try:
-            return psutil.cpu_percent(interval=0.1)
+            return psutil.cpu_percent(interval=None)
         except Exception as e:
             logger.error(f"Failed to get CPU usage: {e}")
             return 0.0
@@ -319,13 +325,20 @@ class SystemInfoService:
     def get_system_resources(cls) -> dict:
         """
         Get all system resource metrics in one call.
-
-        Returns dict with cpu, memory, and disk info.
+        Cached for 10 seconds to avoid blocking workers on every request.
         """
-        return {
+        global _system_resources_cache, _system_resources_cache_time
+        now = time.monotonic()
+        if _system_resources_cache and (now - _system_resources_cache_time) < _SYSTEM_RESOURCES_TTL:
+            return _system_resources_cache
+
+        result = {
             "cpu": {
                 "percent": cls.get_cpu_usage(),
             },
             "memory": cls.get_memory_info(),
             "disk": cls.get_disk_info(),
         }
+        _system_resources_cache = result
+        _system_resources_cache_time = now
+        return result
