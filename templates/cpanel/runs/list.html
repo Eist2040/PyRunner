@@ -8,9 +8,20 @@
 
     <div class="flex-1 p-8">
         <!-- Header -->
-        <div class="mb-8">
-            <h1 class="text-2xl font-bold text-code-text">Runs</h1>
-            <p class="text-code-muted">Execution history for all scripts</p>
+        <div class="mb-8 flex items-start justify-between">
+            <div>
+                <h1 class="text-2xl font-bold text-code-text">Runs</h1>
+                <p class="text-code-muted">Execution history for all scripts
+                    {% if paginator.count %}<span class="ml-1">({{ paginator.count }} total)</span>{% endif %}
+                </p>
+            </div>
+            <!-- Clear Runs -->
+            <div class="flex items-center gap-2">
+                <button onclick="document.getElementById('clear-modal').classList.remove('hidden')"
+                        class="px-4 py-2 text-sm bg-code-red/10 hover:bg-code-red/20 text-code-red border border-code-red/30 rounded-lg transition-colors">
+                    Clear Runs
+                </button>
+            </div>
         </div>
 
         <!-- Filters -->
@@ -101,6 +112,32 @@
                 </tbody>
             </table>
         </div>
+
+        <!-- Pagination -->
+        {% if paginator.num_pages > 1 %}
+        <div class="mt-6 flex items-center justify-between">
+            <p class="text-sm text-code-muted">
+                Page {{ page_obj.number }} of {{ paginator.num_pages }}
+                &nbsp;·&nbsp; {{ paginator.count }} total runs
+            </p>
+            <div class="flex items-center gap-2">
+                {% if page_obj.has_previous %}
+                <a href="?page=1{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">«</a>
+                <a href="?page={{ page_obj.previous_page_number }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">‹ Prev</a>
+                {% endif %}
+
+                {% if page_obj.has_next %}
+                <a href="?page={{ page_obj.next_page_number }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">Next ›</a>
+                <a href="?page={{ paginator.num_pages }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">»</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
         {% else %}
         <div class="bg-code-surface border border-code-border rounded-xl p-12 text-center">
             <div class="w-16 h-16 bg-code-accent/20 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -116,6 +153,57 @@
             </a>
         </div>
         {% endif %}
+    </div>
+</div>
+
+<!-- Clear Runs Modal -->
+<div id="clear-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-code-surface border border-code-border rounded-xl p-6 w-full max-w-md mx-4">
+        <h2 class="text-lg font-bold text-code-text mb-4">Clear Runs</h2>
+        <form method="post" action="{% url 'cpanel:run_clear' %}">
+            {% csrf_token %}
+            <div class="space-y-3 mb-6">
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-border hover:bg-code-bg cursor-pointer">
+                    <input type="radio" name="mode" value="older_than" checked class="text-code-accent">
+                    <div>
+                        <div class="text-code-text text-sm font-medium">Older than N days</div>
+                        <div class="flex items-center gap-2 mt-1">
+                            <input type="number" name="days" value="30" min="1"
+                                   class="w-20 px-2 py-1 text-sm bg-code-bg border border-code-border rounded text-code-text focus:outline-none focus:ring-1 focus:ring-code-accent">
+                            <span class="text-code-muted text-xs">days old</span>
+                        </div>
+                    </div>
+                </label>
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-border hover:bg-code-bg cursor-pointer">
+                    <input type="radio" name="mode" value="status" class="text-code-accent">
+                    <div>
+                        <div class="text-code-text text-sm font-medium">By status</div>
+                        <select name="status" class="mt-1 px-2 py-1 text-sm bg-code-bg border border-code-border rounded text-code-text focus:outline-none">
+                            {% for value, label in status_choices %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </label>
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-red/40 hover:bg-code-red/5 cursor-pointer">
+                    <input type="radio" name="mode" value="all" class="text-code-red">
+                    <div>
+                        <div class="text-code-red text-sm font-medium">Delete ALL runs</div>
+                        <div class="text-code-muted text-xs">This cannot be undone</div>
+                    </div>
+                </label>
+            </div>
+            <div class="flex gap-3 justify-end">
+                <button type="button" onclick="document.getElementById('clear-modal').classList.add('hidden')"
+                        class="px-4 py-2 text-sm text-code-muted hover:text-code-text border border-code-border rounded-lg transition-colors">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 text-sm bg-code-red hover:bg-code-red/90 text-white font-semibold rounded-lg transition-colors">
+                    Clear Runs
+                </button>
+            </div>
+        </form>
     </div>
 </div>
 {% endblock %}
