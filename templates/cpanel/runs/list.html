@@ -103,9 +103,17 @@
                             {% if run.started_at %}{{ run.started_at|date:"M d, H:i" }}{% else %}{{ run.created_at|date:"M d, H:i" }}{% endif %}
                         </td>
                         <td class="px-6 py-4 text-right">
+                            <div class="flex items-center justify-end gap-2">
+                            {% if run.status == 'running' or run.status == 'pending' %}
+                            <button onclick="stopRun('{{ run.pk }}', this)"
+                                    class="px-2 py-1 text-xs bg-code-red/10 hover:bg-code-red/20 text-code-red border border-code-red/30 rounded transition-colors">
+                                ⏹ Stop
+                            </button>
+                            {% endif %}
                             <a href="{% url 'cpanel:run_detail' pk=run.pk %}" class="text-code-accent hover:underline text-sm">
                                 View
                             </a>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -156,8 +164,26 @@
     </div>
 </div>
 
-<!-- Clear Runs Modal -->
-<div id="clear-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+<script>
+const CSRF = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '{{ csrf_token }}';
+function stopRun(runId, btn) {
+    if (!confirm('Stop this run? The process will be killed.')) return;
+    btn.disabled = true;
+    btn.textContent = '…';
+    fetch('/cpanel/runs/' + runId + '/stop/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': CSRF, 'Content-Type': 'application/json' },
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) { location.reload(); }
+        else { alert('Stop failed: ' + (data.error || 'Unknown')); btn.disabled = false; btn.textContent = '⏹ Stop'; }
+    })
+    .catch(() => location.reload());
+}
+</script>
+
+<!-- Clear Runs Modal --><div id="clear-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
     <div class="bg-code-surface border border-code-border rounded-xl p-6 w-full max-w-md mx-4">
         <h2 class="text-lg font-bold text-code-text mb-4">Clear Runs</h2>
         <form method="post" action="{% url 'cpanel:run_clear' %}">
