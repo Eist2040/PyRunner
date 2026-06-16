@@ -1,12 +1,15 @@
 """
 Run views for the control panel.
 """
+import os
+import signal
+
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_POST
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from core.models import Run, Script
 
@@ -91,3 +94,61 @@ def run_clear_view(request: HttpRequest) -> HttpResponse:
         messages.error(request, "Unknown clear mode.")
 
     return redirect("cpanel:run_list")
+
+
+@login_required
+@require_POST
+def run_stop_view(request: HttpRequest, pk) -> JsonResponse:
+    """
+    Kill a running or pending script run.
+
+    For RUNNING runs: sends SIGTERM (graceful) then SIGKILL (force) to the
+    subprocess via the stored PID. For PENDING runs: marks cancelled directly.
+    """
+    from django.utils import timezone
+
+    run = get_object_or_404(Run, pk=pk)
+
+    if run.status not in (Run.Status.RUNNING, Run.Status.PENDING):
+        return JsonResponse(
+            {"success": False, "error": f"Run is already {run.status}"},
+            status=400,
+        )
+
+    killed = False
+    kill_error = None
+
+    if run.status == Run.Status.RUNNING and run.pid:
+        try:
+            if os.name == "nt":
+                # Windows: taskkill /F kills the process tree
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/T", "/PID", str(run.pid)], check=False)
+            else:
+                try:
+                    os.killpg(os.getpgid(run.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    os.kill(run.pid, signal.SIGTERM)
+            killed = True
+        except ProcessLookupError:
+            # Process already dead — still mark cancelled
+            killed = True
+        except Exception as e:
+            kill_error = str(e)
+
+    # Mark cancelled regardless of whether kill succeeded
+    run.status = Run.Status.CANCELLED
+    run.ended_at = timezone.now()
+    run.pid = None
+    note = "\n[Run stopped by user]"
+    if kill_error:
+        note += f"\n[Kill attempt error: {kill_error}]"
+    run.stderr = (run.stderr or "") + note
+    run.save(update_fields=["status", "ended_at", "pid", "stderr"])
+
+    return JsonResponse({
+        "success": True,
+        "killed": killed,
+        "message": "Run stopped successfully.",
+    })
+
