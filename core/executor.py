@@ -8,6 +8,7 @@ It is designed to be called from django-q2 async tasks.
 import json
 import logging
 import os
+import signal
 import subprocess
 import tempfile
 import traceback
@@ -277,12 +278,8 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
 
             # Subprocess kwargs
             kwargs = {
-                "capture_output": True,
                 "timeout": run.script.timeout_seconds,
                 "cwd": str(workdir),
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
                 "env": script_env,
             }
 
@@ -290,37 +287,61 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-            result = subprocess.run(cmd, **kwargs)
+            # Use Popen so we can store the PID for user-initiated stop
+            with subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **{k: v for k, v in kwargs.items() if k != "timeout"},
+            ) as proc:
+                # Persist PID so the stop view can kill the process
+                run.pid = proc.pid
+                run.save(update_fields=["pid"])
 
-            # Process results - mask secrets in output
-            run.stdout = _truncate_output(_mask_secrets_in_output(result.stdout, secrets))
-            run.stderr = _truncate_output(_mask_secrets_in_output(result.stderr, secrets))
-            run.exit_code = result.returncode
+                try:
+                    stdout_data, stderr_data = proc.communicate(
+                        timeout=run.script.timeout_seconds
+                    )
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout_data, stderr_data = proc.communicate()
+                    run.status = Run.Status.TIMEOUT
+                    run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
+                    run.stderr = _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
+                    if run.stderr:
+                        run.stderr += "\n\n[TIMEOUT: Script exceeded maximum execution time]"
+                    else:
+                        run.stderr = (
+                            f"[TIMEOUT: Script exceeded {run.script.timeout_seconds} seconds]"
+                        )
+                    run.exit_code = -1
+                    logger.warning(f"Run {run.id} timed out after {run.script.timeout_seconds}s")
+                    # Clear PID — process is dead
+                    run.pid = None
+                    return
+
+            # Check if user cancelled while running
+            run.refresh_from_db(fields=["status"])
+            if run.status == Run.Status.CANCELLED:
+                # Process already killed by stop view — just preserve the stderr note
+                run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
+                if run.stderr:
+                    run.stderr += "\n" + _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
+                run.exit_code = proc.returncode
+                run.pid = None
+                return
+
+            # Normal completion
+            run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
+            run.stderr = _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
+            run.exit_code = proc.returncode
             run.status = (
-                Run.Status.SUCCESS if result.returncode == 0 else Run.Status.FAILED
+                Run.Status.SUCCESS if proc.returncode == 0 else Run.Status.FAILED
             )
-
-        except subprocess.TimeoutExpired as e:
-            # Handle timeout - process is automatically killed
-            run.status = Run.Status.TIMEOUT
-            # TimeoutExpired provides stdout/stderr as bytes even with text=True
-            # Decode them to strings for consistent processing
-            stdout_raw = ""
-            if e.stdout:
-                stdout_raw = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else e.stdout
-            stderr_raw = ""
-            if e.stderr:
-                stderr_raw = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else e.stderr
-            run.stdout = _truncate_output(_mask_secrets_in_output(stdout_raw, secrets))
-            run.stderr = _truncate_output(_mask_secrets_in_output(stderr_raw, secrets))
-            if run.stderr:
-                run.stderr += "\n\n[TIMEOUT: Script exceeded maximum execution time]"
-            else:
-                run.stderr = (
-                    f"[TIMEOUT: Script exceeded {run.script.timeout_seconds} seconds]"
-                )
-            run.exit_code = -1
-            logger.warning(f"Run {run.id} timed out after {run.script.timeout_seconds}s")
+            run.pid = None
 
         except subprocess.SubprocessError as e:
             # Handle other subprocess errors
@@ -341,6 +362,9 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
         # Always set end time if not already set
         if not run.ended_at:
             run.ended_at = timezone.now()
+
+        # Clear PID — process is no longer running
+        run.pid = None
 
         # Always save the run state
         run.save()
