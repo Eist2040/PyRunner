@@ -86,6 +86,13 @@ class Run(models.Model):
         related_name="triggered_runs",
     )
 
+    # OS PID of the running subprocess (set during execution, cleared on finish)
+    pid = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="OS process ID of the running subprocess",
+    )
+
     # django-q2 task tracking
     task_id = models.CharField(
         max_length=100,
