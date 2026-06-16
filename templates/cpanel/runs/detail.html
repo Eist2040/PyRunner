@@ -3,9 +3,6 @@
 {% block title %}Run {{ run.pk|truncatechars:8 }} - PyRunner{% endblock %}
 
 {% block extra_head %}
-{% if run.status == 'pending' or run.status == 'running' %}
-<meta http-equiv="refresh" content="5">
-{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -64,10 +61,45 @@
                     {% if run.status == 'pending' %}Queued and waiting for a worker...{% else %}Running...{% endif %}
                 </span>
             </div>
-            <button onclick="location.reload();" class="px-3 py-1 text-sm bg-code-accent/20 hover:bg-code-accent/30 text-code-accent rounded transition-colors">
-                Refresh
-            </button>
+            <div class="flex items-center gap-2">
+                <button onclick="location.reload();" class="px-3 py-1 text-sm bg-code-accent/20 hover:bg-code-accent/30 text-code-accent rounded transition-colors">
+                    Refresh
+                </button>
+                <button id="stop-btn" onclick="stopRun('{{ run.pk }}')"
+                        class="px-3 py-1 text-sm bg-code-red/20 hover:bg-code-red/30 text-code-red border border-code-red/40 rounded transition-colors">
+                    ⏹ Stop
+                </button>
+            </div>
         </div>
+
+        <script>
+        function stopRun(runId) {
+            if (!confirm('Stop this run? The process will be killed.')) return;
+            const btn = document.getElementById('stop-btn');
+            btn.disabled = true;
+            btn.textContent = 'Stopping…';
+            fetch('/cpanel/runs/' + runId + '/stop/', {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': '{{ csrf_token }}',
+                    'Content-Type': 'application/json',
+                },
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Stop failed: ' + (data.error || 'Unknown error'));
+                    btn.disabled = false;
+                    btn.textContent = '⏹ Stop';
+                }
+            })
+            .catch(() => { location.reload(); });
+        }
+        // Auto-refresh every 5s while active
+        setTimeout(() => location.reload(), 5000);
+        </script>
         {% endif %}
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
