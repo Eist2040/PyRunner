@@ -146,10 +146,10 @@
                         </td>
                         <!-- Annotated counts — no N+1 queries -->
                         <td class="px-6 py-4 text-code-text">
-                            {{ script._run_count|default:0 }}
+                            {{ script.runs_total|default:0 }}
                         </td>
                         <td class="px-6 py-4">
-                            {% with total=script._run_count|default:0 success=script._success_count|default:0 %}
+                            {% with total=script.runs_total|default:0 success=script.runs_success|default:0 %}
                             {% if total > 0 %}
                             {% widthratio success total 100 as pct %}
                             <span class="{% if pct >= 80 %}text-code-green{% elif pct >= 50 %}text-code-yellow{% else %}text-code-red{% endif %}">
@@ -161,7 +161,7 @@
                             {% endwith %}
                         </td>
                         <td class="px-6 py-4 text-code-muted text-sm">
-                            {% if script.code_size > 1024*1024 %}
+                            {% if script.code_size > 1048576 %}
                                 {{ script.code_size|filesizeformat }}
                             {% elif script.code_size > 0 %}
                                 {{ script.code_line_count|default:0 }} lines
