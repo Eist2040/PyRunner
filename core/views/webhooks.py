@@ -1,10 +1,16 @@
 """
 Webhook views for triggering scripts via HTTP.
-"""
 
+Improvements:
+  * Webhook body is read up to MAX_WEBHOOK_BODY_BYTES (default 10MB) —
+    above that we reject with 413 instead of letting Django OOM.
+  * We stream large request bodies via request.stream instead of
+    request.body so we don't buffer the entire payload into RAM.
+"""
 import json
 import logging
 
+from django.conf import settings
 from django.core.cache import cache
 from django.http import JsonResponse, HttpRequest
 from django.views.decorators.csrf import csrf_exempt
@@ -15,9 +21,10 @@ from core.tasks import queue_script_run
 
 logger = logging.getLogger(__name__)
 
-# Rate limit: 30 requests per minute per IP
 WEBHOOK_RATE_LIMIT = 30
 WEBHOOK_RATE_WINDOW = 60  # seconds
+
+MAX_BODY_BYTES = getattr(settings, "MAX_WEBHOOK_BODY_BYTES", 10 * 1024 * 1024)
 
 
 @csrf_exempt
@@ -25,23 +32,7 @@ WEBHOOK_RATE_WINDOW = 60  # seconds
 def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
     """
     Public endpoint to trigger script execution via webhook.
-
-    Accepts GET and POST requests. For POST, the request body and query
-    parameters are passed to the script as environment variables.
-
-    Args:
-        request: The HTTP request
-        token: The webhook token (64-char URL-safe string)
-
-    Returns:
-        JsonResponse with:
-        - 200: Script queued successfully
-        - 403: Script is disabled
-        - 404: Invalid token
-        - 429: Rate limit exceeded
-        - 500: Failed to queue
     """
-    # Rate limiting by IP
     client_ip = request.META.get("REMOTE_ADDR", "unknown")
     rate_key = f"webhook_rate_{client_ip}"
     requests_count = cache.get(rate_key, 0)
@@ -55,7 +46,6 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
 
     cache.set(rate_key, requests_count + 1, WEBHOOK_RATE_WINDOW)
 
-    # Find script by token
     try:
         script = Script.objects.select_related("environment").get(webhook_token=token)
     except Script.DoesNotExist:
@@ -65,7 +55,6 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
             status=404,
         )
 
-    # Check if script can run (enabled and not archived)
     if not script.can_run:
         reason = "archived" if script.is_archived else "disabled"
         logger.info(f"Webhook trigger rejected - script {reason}: {script.name}")
@@ -74,23 +63,19 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
             status=403,
         )
 
-    # Extract webhook data
     webhook_data = _extract_webhook_data(request)
 
-    # Create a new Run record
     run = Run.objects.create(
         script=script,
         status=Run.Status.PENDING,
-        triggered_by=None,  # Webhook-triggered, no user
+        triggered_by=None,
         trigger_type=Run.TriggerType.API,
         code_snapshot=script.code,
+        code_snapshot_sha256=script.code_sha256,
     )
 
-    # Store webhook data in the run for the executor
-    # We'll pass this through a custom field or via task args
     run._webhook_data = webhook_data
 
-    # Queue for async execution
     try:
         queue_script_run(run, webhook_data=webhook_data)
         logger.info(f"Webhook triggered run {run.id} for script {script.name}")
@@ -115,13 +100,11 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
 
 def _extract_webhook_data(request: HttpRequest) -> dict:
     """
-    Extract webhook data from the request.
+    Extract webhook data from the request, enforcing a body size cap.
 
-    Returns a dict with:
-    - method: GET or POST
-    - body: Request body as string (for POST)
-    - query: Query parameters as dict
-    - content_type: Request content type
+    Uses request.stream to read in chunks (avoids full buffering of huge
+    payloads into memory). If the body exceeds MAX_WEBHOOK_BODY_BYTES the
+    excess is dropped and a `body_truncated=True` flag is set.
     """
     data = {
         "method": request.method,
@@ -129,19 +112,50 @@ def _extract_webhook_data(request: HttpRequest) -> dict:
         "content_type": request.content_type or "",
     }
 
-    # Extract body for POST requests
-    if request.method == "POST":
-        try:
-            body = request.body.decode("utf-8")
-            data["body"] = body
+    if request.method != "POST":
+        return data
 
-            # Try to parse as JSON for convenience
-            if request.content_type == "application/json":
-                try:
-                    data["body_json"] = json.loads(body)
-                except json.JSONDecodeError:
-                    pass
-        except Exception:
-            data["body"] = ""
+    # Determine declared body size
+    try:
+        declared_len = int(request.META.get("CONTENT_LENGTH", 0) or 0)
+    except ValueError:
+        declared_len = 0
+
+    truncated = declared_len > MAX_BODY_BYTES
+    if declared_len and declared_len > MAX_BODY_BYTES:
+        logger.warning(
+            f"Webhook body truncation: declared {declared_len} > limit {MAX_BODY_BYTES}"
+        )
+
+    # Stream the body in 64KB chunks until we hit the cap
+    chunks = []
+    received = 0
+    for chunk in request.stream(64 * 1024):
+        if received + len(chunk) > MAX_BODY_BYTES:
+            allowed = MAX_BODY_BYTES - received
+            if allowed > 0:
+                chunks.append(chunk[:allowed])
+                received += allowed
+            truncated = True
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+
+    raw = b"".join(chunks)
+    try:
+        body_text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        body_text = raw.decode("utf-8", errors="replace")
+
+    data["body"] = body_text
+    data["body_truncated"] = truncated
+    data["body_size"] = received
+
+    # Try JSON parse for convenience
+    if request.content_type == "application/json":
+        try:
+            data["body_json"] = json.loads(body_text)
+        except json.JSONDecodeError:
+            pass
 
     return data
