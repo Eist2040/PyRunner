@@ -106,6 +106,7 @@ class RetentionService:
     ) -> int:
         """
         Delete old runs for a specific script based on retention policy.
+        Also deletes any spooled output files for the deleted runs.
 
         Args:
             script: Script model instance
@@ -115,8 +116,21 @@ class RetentionService:
         Returns:
             int: Number of runs deleted
         """
+        from core.services.output_storage_service import OutputStorageService
+
         runs_to_delete = cls.get_runs_to_delete_for_script(script, days, count)
+
+        # Collect IDs before deletion so we can clean their spool files.
+        run_ids = list(runs_to_delete.values_list("id", flat=True))
         deleted_count, _ = runs_to_delete.delete()
+
+        # Best-effort spool cleanup (one call per run is fine — file ops
+        # are cheap; we batched the DB delete which is the expensive bit).
+        for rid in run_ids:
+            try:
+                OutputStorageService.delete_for_run(rid)
+            except Exception as e:
+                logger.warning(f"Failed to clean spool for run {rid}: {e}")
 
         if deleted_count > 0:
             logger.info(
@@ -129,11 +143,13 @@ class RetentionService:
     def cleanup_all_runs(cls) -> int:
         """
         Run cleanup for all scripts using global/per-script settings.
+        Also removes orphaned spool files whose Run no longer exists.
 
         Returns:
             int: Total number of runs deleted
         """
-        from core.models import Script
+        from core.models import Script, Run
+        from core.services.output_storage_service import OutputStorageService
 
         total_deleted = 0
         scripts = Script.objects.all()
@@ -146,6 +162,16 @@ class RetentionService:
                 logger.error(
                     f"Failed to cleanup runs for script '{script.name}': {e}"
                 )
+
+        # Sweep orphaned spool files (files on disk whose Run was deleted
+        # out-of-band, e.g. via SQL or manual file deletion).
+        try:
+            valid_ids = set(Run.objects.values_list("id", flat=True))
+            orphans = OutputStorageService.cleanup_orphans(valid_ids)
+            if orphans:
+                logger.info(f"Removed {orphans} orphaned output spool files")
+        except Exception as e:
+            logger.warning(f"Orphan spool cleanup failed: {e}")
 
         logger.info(f"Total cleanup: {total_deleted} runs deleted across all scripts")
         return total_deleted
