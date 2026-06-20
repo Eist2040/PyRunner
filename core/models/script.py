@@ -2,6 +2,7 @@
 Script model for user-created Python scripts.
 """
 
+import hashlib
 import secrets
 import uuid
 
@@ -9,6 +10,11 @@ from django.conf import settings
 from django.db import models
 
 from .environment import Environment
+
+
+# Hard cap on script body size, read from settings (default 50MB).
+def _max_script_size_bytes() -> int:
+    return getattr(settings, "MAX_SCRIPT_SIZE_BYTES", 50 * 1024 * 1024)
 
 
 class Script(models.Model):
@@ -21,8 +27,27 @@ class Script(models.Model):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
 
-    # The actual Python code
+    # The actual Python code. TextField has no inherent size limit in
+    # SQLite/Postgres, so this can hold 100K+ line scripts without issue.
     code = models.TextField(help_text="Python code to execute")
+
+    # Pre-computed code hash for fast dedup / change detection. Updated on
+    # every save() — used by Run.code_snapshot logic to avoid re-storing
+    # identical code blobs on every run.
+    code_sha256 = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="SHA-256 of the code (for dedup / change detection)",
+    )
+    code_size = models.BigIntegerField(
+        default=0,
+        help_text="Size of the code field in bytes",
+    )
+    code_line_count = models.IntegerField(
+        default=0,
+        help_text="Number of lines in the code (for display)",
+    )
 
     # Execution settings
     environment = models.ForeignKey(
@@ -130,6 +155,10 @@ class Script(models.Model):
         verbose_name = "script"
         verbose_name_plural = "scripts"
         ordering = ["-updated_at"]
+        indexes = [
+            # Helpful for list views that filter by archived + ordering
+            models.Index(fields=["archived_at", "-updated_at"]),
+        ]
 
     def __str__(self):
         if self.is_archived:
@@ -173,11 +202,10 @@ class Script(models.Model):
 
     def get_code_preview(self, max_lines: int = 5) -> str:
         """Return a preview of the script code (first N lines)."""
-        lines = self.code.split("\n")[:max_lines]
-        preview = "\n".join(lines)
-        if len(self.code.split("\n")) > max_lines:
-            preview += "\n..."
-        return preview
+        lines = self.code.split("\n", max_lines + 1)
+        if len(lines) > max_lines:
+            return "\n".join(lines[:max_lines]) + "\n..."
+        return "\n".join(lines)
 
     @staticmethod
     def generate_webhook_token() -> str:
@@ -203,3 +231,38 @@ class Script(models.Model):
     def has_webhook(self) -> bool:
         """Check if this script has a webhook token configured."""
         return bool(self.webhook_token)
+
+    # ----- New helpers for large-script support -----
+
+    @classmethod
+    def max_size_bytes(cls) -> int:
+        """The server-side hard cap on script body size."""
+        return _max_script_size_bytes()
+
+    @staticmethod
+    def compute_hash(code: str) -> str:
+        """Compute SHA-256 hex digest of code (UTF-8 encoded)."""
+        return hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        """
+        Override save() to maintain code_sha256 / code_size / code_line_count.
+        This is cheap (one hash + one split) and saves a lot of work later
+        for the run-list and dedup paths.
+        """
+        if self.code is None:
+            self.code = ""
+        # Avoid expensive recompute on partial saves that didn't touch `code`.
+        update_fields = kwargs.get("update_fields")
+        if update_fields is None or "code" in update_fields:
+            self.code_sha256 = self.compute_hash(self.code)
+            self.code_size = len(self.code.encode("utf-8", errors="replace"))
+            # Cheap line count (no full split into a list)
+            self.code_line_count = self.code.count("\n") + (0 if not self.code or self.code.endswith("\n") else 1)
+            if update_fields is not None:
+                # Make sure these computed fields get persisted too
+                for f in ("code_sha256", "code_size", "code_line_count"):
+                    if f not in update_fields:
+                        update_fields = list(update_fields) + [f]
+                kwargs["update_fields"] = update_fields
+        super().save(*args, **kwargs)
