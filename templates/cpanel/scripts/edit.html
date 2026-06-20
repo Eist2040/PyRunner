@@ -160,7 +160,26 @@ require(['vs/editor/editor.main'], function () {
             }
         }
     }
-    pyrunnerEditor.onDidChangeModelContent(updateSizeIndicator);
+
+    // CRITICAL: keep the hidden <textarea> in sync with the editor so the
+    // form POST contains the edited code. Without this, the original code
+    // is submitted every time and edits silently disappear.
+    pyrunnerEditor.onDidChangeModelContent(function () {
+        textarea.value = pyrunnerEditor.getValue();
+        updateSizeIndicator();
+    });
+
+    // Also sync immediately before any form submit (covers edge cases where
+    // the change event hasn't fired yet — e.g. programmatic edits).
+    const form = document.getElementById('script-form');
+    if (form) {
+        form.addEventListener('submit', function () {
+            if (pyrunnerEditor) {
+                textarea.value = pyrunnerEditor.getValue();
+            }
+        }, true);  // capture phase — runs before any other submit handler
+    }
+
     updateSizeIndicator();
 });
 
