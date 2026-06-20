@@ -38,6 +38,49 @@ DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
 
+# =============================================================================
+# Large Payload Limits (raises Django's defaults so 100K+ line scripts work)
+# =============================================================================
+# Django's defaults are 2.5MB — far too small for production-grade scripts.
+# A 100,000-line Python script averages ~5–10MB; raise to 100MB so admin-authored
+# scripts upload cleanly. Tune via env vars if you need stricter limits.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(100 * 1024 * 1024))  # 100 MB
+)
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(100 * 1024 * 1024))  # 100 MB
+)
+# Some WSGI servers (gunicorn, daphne) also impose body limits; document the
+# recommended minimum here so operators can align reverse-proxy limits.
+RECOMMENDED_PROXY_BODY_LIMIT = 100 * 1024 * 1024  # 100 MB
+
+# Maximum script source size accepted by the application (bytes).
+# Default: 50 MB — enough for ~1M lines of code.
+MAX_SCRIPT_SIZE_BYTES = int(
+    os.environ.get("MAX_SCRIPT_SIZE_BYTES", str(50 * 1024 * 1024))  # 50 MB
+)
+
+# Maximum captured stdout/stderr per run (bytes). Output beyond this is
+# spooled to disk and served via a streaming endpoint (see OutputStorageService).
+MAX_OUTPUT_BYTES = int(
+    os.environ.get("MAX_OUTPUT_BYTES", str(50 * 1024 * 1024))  # 50 MB inline
+)
+MAX_OUTPUT_SPOOL_BYTES = int(
+    os.environ.get("MAX_OUTPUT_SPOOL_BYTES", str(2 * 1024 * 1024 * 1024))  # 2 GB on disk
+)
+
+# Threshold above which the executor switches from inline capture to disk spool.
+OUTPUT_SPOOL_THRESHOLD = int(
+    os.environ.get("OUTPUT_SPOOL_THRESHOLD", str(4 * 1024 * 1024))  # 4 MB
+)
+
+# Webhook body size limit (bytes). Large webhook payloads are streamed to a
+# temp file instead of being decoded into memory all at once.
+MAX_WEBHOOK_BODY_BYTES = int(
+    os.environ.get("MAX_WEBHOOK_BODY_BYTES", str(10 * 1024 * 1024))  # 10 MB
+)
+
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -116,6 +159,11 @@ def _enable_sqlite_wal(sender, connection, **kwargs):
         cursor = connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA busy_timeout=30000;")
+        # Allow SQLite to hold very large TEXT blobs without slowdown.
+        # mmap_size maps the DB file into memory for faster large-row reads.
+        cursor.execute("PRAGMA mmap_size=268435456;")  # 256 MB
+        cursor.execute("PRAGMA cache_size=-65536;")     # 64 MB page cache
+        cursor.execute("PRAGMA temp_store=MEMORY;")
 
 
 from django.db.backends.signals import connection_created
@@ -273,10 +321,15 @@ DATA_DIR = BASE_DIR / "data"
 ENVIRONMENTS_ROOT = DATA_DIR / "environments"
 SCRIPTS_WORKDIR = DATA_DIR / "workdir"
 
+# Directory where oversized run outputs are spooled to disk so the database
+# doesn't become a multi-GB blob store. Cleaned up by the retention service.
+OUTPUT_SPOOL_DIR = DATA_DIR / "run_outputs"
+
 # Ensure directories exist
 DATA_DIR.mkdir(exist_ok=True)
 ENVIRONMENTS_ROOT.mkdir(exist_ok=True)
 SCRIPTS_WORKDIR.mkdir(exist_ok=True)
+OUTPUT_SPOOL_DIR.mkdir(exist_ok=True)
 
 
 # Secrets Encryption
@@ -386,3 +439,7 @@ API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", "60"))
 # CORS settings for API endpoints
 # Set to "*" to allow all origins (suitable for self-hosted), or comma-separated origins
 API_CORS_ORIGINS = os.environ.get("API_CORS_ORIGINS", "*")
+
+# Pagination defaults
+DEFAULT_PAGE_SIZE = int(os.environ.get("DEFAULT_PAGE_SIZE", "20"))
+MAX_PAGE_SIZE = int(os.environ.get("MAX_PAGE_SIZE", "200"))
