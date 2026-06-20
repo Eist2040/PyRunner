@@ -37,9 +37,13 @@ def script_list_view(request: HttpRequest) -> HttpResponse:
         .select_related("environment", "created_by")
         .defer("code", "description")
         .annotate(
-            _run_count=models.Count("runs"),
-            _success_count=models.Count(
-                "runs", filter=models.Q(runs__status="success")
+            # Use names without leading underscore — Django templates
+            # refuse to resolve variables starting with '_' (security:
+            # prevents accessing things like _meta). Also avoid clashing
+            # with the Script.run_count @property by using distinct names.
+            runs_total=models.Count("runs", distinct=True),
+            runs_success=models.Count(
+                "runs", filter=models.Q(runs__status="success"), distinct=True
             ),
         )
         .order_by("-updated_at")
