@@ -25,7 +25,7 @@
         </div>
 
         <!-- Form with Two-Column Layout -->
-        <form method="post">
+        <form method="post" id="script-form">
             {% csrf_token %}
 
             <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -65,20 +65,11 @@ function toggleScheduleOptions(mode) {
     const weeklyOptions = document.getElementById('weekly-options');
     const monthlyOptions = document.getElementById('monthly-options');
 
-    if (intervalOptions) {
-        intervalOptions.classList.toggle('hidden', mode !== 'interval');
-    }
-    if (dailyOptions) {
-        dailyOptions.classList.toggle('hidden', mode !== 'daily');
-    }
-    if (weeklyOptions) {
-        weeklyOptions.classList.toggle('hidden', mode !== 'weekly');
-    }
-    if (monthlyOptions) {
-        monthlyOptions.classList.toggle('hidden', mode !== 'monthly');
-    }
+    if (intervalOptions) intervalOptions.classList.toggle('hidden', mode !== 'interval');
+    if (dailyOptions) dailyOptions.classList.toggle('hidden', mode !== 'daily');
+    if (weeklyOptions) weeklyOptions.classList.toggle('hidden', mode !== 'weekly');
+    if (monthlyOptions) monthlyOptions.classList.toggle('hidden', mode !== 'monthly');
 
-    // Update radio button styles
     document.querySelectorAll('input[name="run_mode"]').forEach(radio => {
         const label = radio.closest('label');
         const dot = label.querySelector('span > span');
@@ -103,8 +94,15 @@ function toggleScheduleOptions(mode) {
     });
 }
 
-// Monaco Editor initialization
+// ---------------------------------------------------------------------------
+// Monaco Editor — large-file support
+// ---------------------------------------------------------------------------
+const MAX_SCRIPT_SIZE_BYTES = {{ max_script_size_bytes|default:52428800 }};
+const CHUNK_THRESHOLD = 5 * 1024 * 1024;  // 5MB — above this we chunked-upload
+
 require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
+
+let pyrunnerEditor = null;
 
 require(['vs/editor/editor.main'], function () {
     const textarea = document.getElementById('id_code');
@@ -117,30 +115,177 @@ require(['vs/editor/editor.main'], function () {
 
     textarea.style.display = 'none';
 
-    const editor = monaco.editor.create(container, {
+    // largeFileOptimizations: critical for 100K+ line scripts.
+    // Disables some expensive features (e.g. wrapping long tokens) so the
+    // editor stays responsive on multi-MB files.
+    pyrunnerEditor = monaco.editor.create(container, {
         value: textarea.value,
         language: 'python',
         theme: 'vs-dark',
         fontSize: 14,
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
-        minimap: { enabled: false },
+        minimap: { enabled: true, maxColumn: 80 },
         scrollBeyondLastLine: false,
         lineNumbers: 'on',
         tabSize: 4,
         insertSpaces: true,
-        automaticLayout: true
+        automaticLayout: true,
+        largeFileOptimizations: true,
+        wordBasedSuggestions: false,         // very expensive on big files
+        semanticHighlighting: { enabled: false },  // disable for big files
+        bracketPairColorization: { enabled: true },
+        // Disable features that are O(n) on every keystroke for huge files
+        renderWhitespace: 'none',
+        renderControlCharacters: false,
+        renderLineHighlight: 'all',
+        smoothScrolling: true,
+        cursorBlinking: 'smooth',
+        padding: { top: 12, bottom: 12 },
     });
 
-    editor.onDidChangeModelContent(function () {
-        textarea.value = editor.getValue();
-    });
+    // Track size and warn if approaching limit
+    function updateSizeIndicator() {
+        const val = pyrunnerEditor.getValue();
+        const bytes = new Blob([val]).size;
+        const lines = pyrunnerEditor.getModel().getLineCount();
+        const indicator = document.getElementById('code-size-indicator');
+        if (indicator) {
+            indicator.textContent = `${lines.toLocaleString()} lines · ${formatBytes(bytes)}`;
+            if (bytes > MAX_SCRIPT_SIZE_BYTES) {
+                indicator.classList.add('text-code-red');
+                indicator.classList.remove('text-code-muted');
+            } else if (bytes > MAX_SCRIPT_SIZE_BYTES * 0.8) {
+                indicator.classList.add('text-code-yellow');
+                indicator.classList.remove('text-code-muted', 'text-code-red');
+            }
+        }
+    }
+    pyrunnerEditor.onDidChangeModelContent(updateSizeIndicator);
+    updateSizeIndicator();
+});
+
+function formatBytes(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+// ---------------------------------------------------------------------------
+// Chunked upload — used automatically when the script body exceeds
+// CHUNK_THRESHOLD. Otherwise the regular form submit runs.
+// ---------------------------------------------------------------------------
+document.getElementById('script-form').addEventListener('submit', async function (e) {
+    if (!pyrunnerEditor) return;
+
+    const code = pyrunnerEditor.getValue();
+    const bytes = new Blob([code]).size;
+
+    if (bytes <= CHUNK_THRESHOLD) {
+        // Small script — let the regular Django form submit handle it.
+        return;  // do not preventDefault
+    }
+
+    e.preventDefault();
+
+    if (bytes > MAX_SCRIPT_SIZE_BYTES) {
+        alert(`Script is too large: ${formatBytes(bytes)} exceeds the limit of ${formatBytes(MAX_SCRIPT_SIZE_BYTES)}.`);
+        return;
+    }
+
+    // Initialize chunked upload session
+    const name = document.getElementById('id_name').value;
+    const description = document.getElementById('id_description').value;
+    const envSelect = document.getElementById('id_environment');
+    const environmentId = envSelect ? envSelect.value : '';
+    const timeoutInput = document.getElementById('id_timeout_seconds');
+    const timeoutSeconds = timeoutInput ? parseInt(timeoutInput.value, 10) : 3600;
+    const isEnabled = document.getElementById('id_is_enabled') ? document.getElementById('id_is_enabled').checked : true;
+    const tags = Array.from(document.querySelectorAll('input[name="tags"]:checked')).map(c => c.value);
+
+    let uploadId;
+    try {
+        const initResp = await fetch('{% url "cpanel:script_chunked_upload_init" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            },
+            body: JSON.stringify({
+                name: name,
+                description: description,
+                total_size: bytes,
+                environment_id: environmentId,
+                tags: tags,
+                timeout_seconds: timeoutSeconds,
+                is_enabled: isEnabled,
+            }),
+        });
+        if (!initResp.ok) {
+            const err = await initResp.json().catch(() => ({}));
+            throw new Error(err.error || `Init failed: ${initResp.status}`);
+        }
+        const init = await initResp.json();
+        uploadId = init.upload_id;
+    } catch (err) {
+        alert('Failed to start upload: ' + err.message);
+        return;
+    }
+
+    // Stream the code in 256KB chunks
+    const CHUNK_SIZE = 262144;
+    const encoder = new TextEncoder();
+    const allBytes = encoder.encode(code);
+    let offset = 0;
+
+    try {
+        while (offset < allBytes.length) {
+            const end = Math.min(offset + CHUNK_SIZE, allBytes.length);
+            const chunk = allBytes.slice(offset, end);
+
+            const resp = await fetch(`/cpanel/scripts/upload/${uploadId}/chunk/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'X-Chunk-Offset': String(offset),
+                    'X-Chunk-Size': String(chunk.length),
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                },
+                body: chunk,
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.error || `Chunk upload failed at offset ${offset}: ${resp.status}`);
+            }
+            offset = end;
+        }
+
+        // Finalize
+        const doneResp = await fetch(`/cpanel/scripts/upload/${uploadId}/complete/`, {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            },
+        });
+        if (!doneResp.ok) {
+            const err = await doneResp.json().catch(() => ({}));
+            throw new Error(err.error || `Complete failed: ${doneResp.status}`);
+        }
+        const done = await doneResp.json();
+        if (done.success && done.script_id) {
+            window.location.href = `/cpanel/scripts/${done.script_id}/`;
+        } else {
+            throw new Error('Unknown completion error');
+        }
+    } catch (err) {
+        alert('Chunked upload failed: ' + err.message);
+    }
 });
 
 // Tag selection handling
 document.querySelectorAll('.tag-label').forEach(label => {
     label.addEventListener('click', function(e) {
         if (e.target.tagName === 'INPUT') return;
-        e.preventDefault();  // Prevent browser's default toggle (input is inside label)
+        e.preventDefault();
         const checkbox = this.querySelector('input[type="checkbox"]');
         checkbox.checked = !checkbox.checked;
         updateTagStyle(this, checkbox.checked);
