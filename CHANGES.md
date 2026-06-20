@@ -7,6 +7,35 @@ views, templates, and storage layer.
 
 ---
 
+## HOTFIX v3 — Scripts list page 500 crash
+
+The v2 patch crashed the **Scripts list page** (`/cpanel/scripts/`)
+with a 500 error because of two Django template bugs in
+`templates/cpanel/scripts/list.html`:
+
+1. **Arithmetic in a template tag** — Django templates don't support
+   `*`, `/`, `+`, `-` inside `{% if %}` expressions. The line
+   `{% if script.code_size > 1024*1024 %}` parsed `1024*1024` as a
+   single token, which failed to resolve to a number, and the
+   subsequent `int > None` comparison raised `TypeError` → 500.
+   Fixed by using the literal `1048576` (single integer — Django
+   parses these fine).
+
+2. **Underscore-prefixed annotation names** — Django templates
+   intentionally refuse to resolve variables starting with `_` (a
+   security feature to prevent access to `_meta` and other internals).
+   The annotations `_run_count` and `_success_count` therefore
+   silently resolved to empty strings in the template, breaking the
+   Runs and Success Rate columns.
+   Fixed by renaming to `runs_total` and `runs_success` (and updating
+   the view to match).
+
+If you applied v2 and saw 500s on the Scripts page, re-deploy with
+this v3 zip — only `core/views/scripts.py` and
+`templates/cpanel/scripts/list.html` changed.
+
+---
+
 ## HOTFIX v2 — `DataStoreService` → `DatastoreService` (boot crash)
 
 The first version of this patch had a class-name typo in
@@ -23,10 +52,6 @@ The actual class in `core/services/datastore_service.py` is
 `DatastoreService` (lowercase **s**), so the wrong-cased import raised
 `ImportError` on every boot, which made the container restart-loop on
 Coolify. The fix is to use the same casing as the original repo.
-
-If you applied the v1 patch and your container is restart-looping, just
-re-deploy with this v2 zip — the only file that changed is
-`core/services/__init__.py`.
 
 ---
 
