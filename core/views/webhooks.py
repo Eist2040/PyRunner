@@ -3,9 +3,10 @@ Webhook views for triggering scripts via HTTP.
 
 Improvements:
   * Webhook body is read up to MAX_WEBHOOK_BODY_BYTES (default 10MB) —
-    above that we reject with 413 instead of letting Django OOM.
-  * We stream large request bodies via request.stream instead of
-    request.body so we don't buffer the entire payload into RAM.
+    above that we truncate with a flag instead of letting Django OOM.
+  * Body is read via Django's standard HttpRequest iterator
+    (`for chunk in request:`) so we don't buffer the entire payload
+    into RAM at once.
 """
 import json
 import logging
@@ -102,9 +103,13 @@ def _extract_webhook_data(request: HttpRequest) -> dict:
     """
     Extract webhook data from the request, enforcing a body size cap.
 
-    Uses request.stream to read in chunks (avoids full buffering of huge
-    payloads into memory). If the body exceeds MAX_WEBHOOK_BODY_BYTES the
+    Uses Django's standard HttpRequest iteration (`for chunk in request:`)
+    which yields the body in chunks without buffering the entire payload
+    into RAM at once. If the body exceeds MAX_WEBHOOK_BODY_BYTES the
     excess is dropped and a `body_truncated=True` flag is set.
+
+    Note: Django's `HttpRequest` does NOT have a `.stream()` method —
+    that's a DRF API. Use the iterator protocol instead.
     """
     data = {
         "method": request.method,
@@ -127,10 +132,14 @@ def _extract_webhook_data(request: HttpRequest) -> dict:
             f"Webhook body truncation: declared {declared_len} > limit {MAX_BODY_BYTES}"
         )
 
-    # Stream the body in 64KB chunks until we hit the cap
+    # Stream the body in chunks using Django's iterator protocol.
+    # Each iteration yields a bytes chunk (typically 64KB depending on
+    # the handler). We stop once we've collected MAX_BODY_BYTES.
     chunks = []
     received = 0
-    for chunk in request.stream(64 * 1024):
+    for chunk in request:
+        if not chunk:
+            continue
         if received + len(chunk) > MAX_BODY_BYTES:
             allowed = MAX_BODY_BYTES - received
             if allowed > 0:
