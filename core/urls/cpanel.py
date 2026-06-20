@@ -18,8 +18,17 @@ from core.views.scripts import (
     webhook_enable_view,
     webhook_disable_view,
     webhook_regenerate_view,
+    script_chunked_upload_init,
+    script_chunked_upload_chunk,
+    script_chunked_upload_complete,
 )
-from core.views.runs import run_list_view, run_detail_view, run_clear_view, run_stop_view
+from core.views.runs import (
+    run_list_view,
+    run_detail_view,
+    run_clear_view,
+    run_stop_view,
+    run_output_stream_view,
+)
 from core.views.environments import (
     environment_list_view,
     environment_detail_view,
@@ -134,12 +143,17 @@ urlpatterns = [
     path("scripts/<uuid:pk>/webhook/enable/", webhook_enable_view, name="webhook_enable"),
     path("scripts/<uuid:pk>/webhook/disable/", webhook_disable_view, name="webhook_disable"),
     path("scripts/<uuid:pk>/webhook/regenerate/", webhook_regenerate_view, name="webhook_regenerate"),
+    # Chunked upload (for very large scripts)
+    path("scripts/upload/init/", script_chunked_upload_init, name="script_chunked_upload_init"),
+    path("scripts/upload/<str:upload_id>/chunk/", script_chunked_upload_chunk, name="script_chunked_upload_chunk"),
+    path("scripts/upload/<str:upload_id>/complete/", script_chunked_upload_complete, name="script_chunked_upload_complete"),
 
     # Runs
     path("runs/", run_list_view, name="run_list"),
     path("runs/clear/", run_clear_view, name="run_clear"),
     path("runs/<uuid:pk>/", run_detail_view, name="run_detail"),
     path("runs/<uuid:pk>/stop/", run_stop_view, name="run_stop"),
+    path("runs/<uuid:pk>/output/<str:stream>/", run_output_stream_view, name="run_output_stream"),
 
     # Tasks
     path("tasks/", tasks_view, name="tasks"),
