@@ -157,13 +157,13 @@ def execute_scheduled_run(script_id: str) -> dict:
         logger.error(f"No schedule found for script {script.name}")
         return {"success": False, "error": "No schedule"}
 
-    # Create the run
-    run = Run.objects.create(
-        script=script,
-        status=Run.Status.PENDING,
-        triggered_by=None,  # System-triggered
+    # Create the run — use smart snapshot (skips duplicating code body if
+    # unchanged since the last run, controlled by _create_run in views.scripts).
+    from core.views.scripts import _create_run
+    run = _create_run(
+        script,
+        triggered_by=None,
         trigger_type=Run.TriggerType.SCHEDULED,
-        code_snapshot=script.code,
     )
 
     # Update schedule tracking
