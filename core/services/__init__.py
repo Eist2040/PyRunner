@@ -8,9 +8,10 @@ from .encryption_service import EncryptionService, EncryptionError
 from .notification_service import NotificationService
 from .retention_service import RetentionService
 from .system_info_service import SystemInfoService
-from .datastore_service import DatastoreService
+from .datastore_service import DataStoreService
 from .s3_service import S3Service, S3ServiceError
 from .backup_schedule_service import BackupScheduleService
+from .output_storage_service import OutputStorageService
 
 __all__ = [
     "ScheduleService",
@@ -20,8 +21,9 @@ __all__ = [
     "NotificationService",
     "RetentionService",
     "SystemInfoService",
-    "DatastoreService",
+    "DataStoreService",
     "S3Service",
     "S3ServiceError",
     "BackupScheduleService",
+    "OutputStorageService",
 ]
