@@ -4,6 +4,7 @@ Forms for the core app.
 import re
 from zoneinfo import available_timezones
 
+from django.conf import settings
 from django import forms
 from django.utils.text import slugify
 
@@ -149,9 +150,21 @@ class ScriptForm(forms.ModelForm):
         self.fields["environment"].queryset = Environment.objects.filter(is_active=True)
 
     def clean_code(self):
-        code = self.cleaned_data.get("code", "").strip()
-        if not code:
+        code = self.cleaned_data.get("code", "")
+        if not code or not code.strip():
             raise forms.ValidationError("Script code cannot be empty.")
+
+        # Enforce server-side size cap. This catches the case where the
+        # admin has lowered MAX_SCRIPT_SIZE_BYTES below the WSGI upload
+        # limit and gives the user a friendly message instead of a 500.
+        max_bytes = getattr(settings, "MAX_SCRIPT_SIZE_BYTES", 50 * 1024 * 1024)
+        encoded_len = len(code.encode("utf-8", errors="replace"))
+        if encoded_len > max_bytes:
+            raise forms.ValidationError(
+                f"Script is too large: {encoded_len:,} bytes "
+                f"(limit is {max_bytes:,} bytes). "
+                f"Consider splitting into multiple scripts or using a data file."
+            )
         return code
 
     def clean_timeout_seconds(self):
