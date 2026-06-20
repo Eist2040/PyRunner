@@ -21,7 +21,7 @@
         </div>
 
         <!-- Form with Two-Column Layout -->
-        <form method="post">
+        <form method="post" id="script-form">
             {% csrf_token %}
 
             <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -43,34 +43,24 @@
 {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
 <script>
-// Collapsible sections toggle
 function toggleSection(sectionId) {
     const content = document.getElementById(sectionId + '-content');
     const chevron = document.getElementById(sectionId + '-chevron');
-
     if (content && chevron) {
         content.classList.toggle('hidden');
         chevron.classList.toggle('rotate-180');
     }
 }
 
-// Schedule options toggle
 function toggleScheduleOptions(mode) {
     const intervalOptions = document.getElementById('interval-options');
     const dailyOptions = document.getElementById('daily-options');
+    if (intervalOptions) intervalOptions.classList.toggle('hidden', mode !== 'interval');
+    if (dailyOptions) dailyOptions.classList.toggle('hidden', mode !== 'daily');
 
-    if (intervalOptions) {
-        intervalOptions.classList.toggle('hidden', mode !== 'interval');
-    }
-    if (dailyOptions) {
-        dailyOptions.classList.toggle('hidden', mode !== 'daily');
-    }
-
-    // Update radio button styles
     document.querySelectorAll('input[name="run_mode"]').forEach(radio => {
         const label = radio.closest('label');
         const dot = label.querySelector('span > span');
-
         if (radio.checked) {
             label.classList.add('border-code-accent', 'bg-code-accent/10');
             label.classList.remove('border-code-border');
@@ -91,8 +81,12 @@ function toggleScheduleOptions(mode) {
     });
 }
 
-// Monaco Editor initialization
+const MAX_SCRIPT_SIZE_BYTES = {{ max_script_size_bytes|default:52428800 }};
+const CHUNK_THRESHOLD = 5 * 1024 * 1024;
+
 require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
+
+let pyrunnerEditor = null;
 
 require(['vs/editor/editor.main'], function () {
     const textarea = document.getElementById('id_code');
@@ -105,30 +99,159 @@ require(['vs/editor/editor.main'], function () {
 
     textarea.style.display = 'none';
 
-    const editor = monaco.editor.create(container, {
+    pyrunnerEditor = monaco.editor.create(container, {
         value: textarea.value,
         language: 'python',
         theme: 'vs-dark',
         fontSize: 14,
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
-        minimap: { enabled: false },
+        minimap: { enabled: true, maxColumn: 80 },
         scrollBeyondLastLine: false,
         lineNumbers: 'on',
         tabSize: 4,
         insertSpaces: true,
-        automaticLayout: true
+        automaticLayout: true,
+        largeFileOptimizations: true,
+        wordBasedSuggestions: false,
+        semanticHighlighting: { enabled: false },
+        bracketPairColorization: { enabled: true },
+        renderWhitespace: 'none',
+        renderControlCharacters: false,
+        renderLineHighlight: 'all',
+        smoothScrolling: true,
+        cursorBlinking: 'smooth',
+        padding: { top: 12, bottom: 12 },
     });
 
-    editor.onDidChangeModelContent(function () {
-        textarea.value = editor.getValue();
-    });
+    function updateSizeIndicator() {
+        const val = pyrunnerEditor.getValue();
+        const bytes = new Blob([val]).size;
+        const lines = pyrunnerEditor.getModel().getLineCount();
+        const indicator = document.getElementById('code-size-indicator');
+        if (indicator) {
+            indicator.textContent = `${lines.toLocaleString()} lines · ${formatBytes(bytes)}`;
+            if (bytes > MAX_SCRIPT_SIZE_BYTES) {
+                indicator.classList.add('text-code-red');
+                indicator.classList.remove('text-code-muted');
+            } else if (bytes > MAX_SCRIPT_SIZE_BYTES * 0.8) {
+                indicator.classList.add('text-code-yellow');
+                indicator.classList.remove('text-code-muted', 'text-code-red');
+            }
+        }
+    }
+    pyrunnerEditor.onDidChangeModelContent(updateSizeIndicator);
+    updateSizeIndicator();
 });
 
-// Tag selection handling
+function formatBytes(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+document.getElementById('script-form').addEventListener('submit', async function (e) {
+    if (!pyrunnerEditor) return;
+    const code = pyrunnerEditor.getValue();
+    const bytes = new Blob([code]).size;
+
+    if (bytes <= CHUNK_THRESHOLD) {
+        return;  // regular Django form submit handles it
+    }
+
+    e.preventDefault();
+
+    if (bytes > MAX_SCRIPT_SIZE_BYTES) {
+        alert(`Script is too large: ${formatBytes(bytes)} exceeds the limit of ${formatBytes(MAX_SCRIPT_SIZE_BYTES)}.`);
+        return;
+    }
+
+    const name = document.getElementById('id_name').value;
+    const description = document.getElementById('id_description').value;
+    const envSelect = document.getElementById('id_environment');
+    const environmentId = envSelect ? envSelect.value : '';
+    const timeoutInput = document.getElementById('id_timeout_seconds');
+    const timeoutSeconds = timeoutInput ? parseInt(timeoutInput.value, 10) : 3600;
+    const isEnabled = document.getElementById('id_is_enabled') ? document.getElementById('id_is_enabled').checked : true;
+    const tags = Array.from(document.querySelectorAll('input[name="tags"]:checked')).map(c => c.value);
+
+    let uploadId;
+    try {
+        const initResp = await fetch('{% url "cpanel:script_chunked_upload_init" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            },
+            body: JSON.stringify({
+                name: name,
+                description: description,
+                total_size: bytes,
+                environment_id: environmentId,
+                tags: tags,
+                timeout_seconds: timeoutSeconds,
+                is_enabled: isEnabled,
+            }),
+        });
+        if (!initResp.ok) {
+            const err = await initResp.json().catch(() => ({}));
+            throw new Error(err.error || `Init failed: ${initResp.status}`);
+        }
+        const init = await initResp.json();
+        uploadId = init.upload_id;
+    } catch (err) {
+        alert('Failed to start upload: ' + err.message);
+        return;
+    }
+
+    const CHUNK_SIZE = 262144;
+    const encoder = new TextEncoder();
+    const allBytes = encoder.encode(code);
+    let offset = 0;
+
+    try {
+        while (offset < allBytes.length) {
+            const end = Math.min(offset + CHUNK_SIZE, allBytes.length);
+            const chunk = allBytes.slice(offset, end);
+            const resp = await fetch(`/cpanel/scripts/upload/${uploadId}/chunk/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'X-Chunk-Offset': String(offset),
+                    'X-Chunk-Size': String(chunk.length),
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                },
+                body: chunk,
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.error || `Chunk upload failed at offset ${offset}: ${resp.status}`);
+            }
+            offset = end;
+        }
+
+        const doneResp = await fetch(`/cpanel/scripts/upload/${uploadId}/complete/`, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value },
+        });
+        if (!doneResp.ok) {
+            const err = await doneResp.json().catch(() => ({}));
+            throw new Error(err.error || `Complete failed: ${doneResp.status}`);
+        }
+        const done = await doneResp.json();
+        if (done.success && done.script_id) {
+            window.location.href = `/cpanel/scripts/${done.script_id}/`;
+        } else {
+            throw new Error('Unknown completion error');
+        }
+    } catch (err) {
+        alert('Chunked upload failed: ' + err.message);
+    }
+});
+
 document.querySelectorAll('.tag-label').forEach(label => {
     label.addEventListener('click', function(e) {
         if (e.target.tagName === 'INPUT') return;
-        e.preventDefault();  // Prevent browser's default toggle (input is inside label)
+        e.preventDefault();
         const checkbox = this.querySelector('input[type="checkbox"]');
         checkbox.checked = !checkbox.checked;
         updateTagStyle(this, checkbox.checked);
