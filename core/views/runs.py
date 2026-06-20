@@ -1,23 +1,37 @@
 """
 Run views for the control panel.
+
+Improvements for 100K+ line script support:
+  * run_detail_view defers heavy fields by default and lets the template
+    fetch large stdout/stderr via a streaming endpoint.
+  * run_output_stream_view serves a slice of the (possibly spooled)
+    stdout/stderr so the browser can virtualize huge outputs in chunks.
+  * run_clear_view also deletes any spool files for the deleted runs.
 """
 import os
 import signal
 
+from django.conf import settings
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    JsonResponse,
+    StreamingHttpResponse,
+    Http404,
+)
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_GET
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from core.models import Run, Script
+from core.services.output_storage_service import OutputStorageService
 
 
 @login_required
 def run_list_view(request: HttpRequest) -> HttpResponse:
     """List all runs with pagination. Defers large text blobs for speed."""
-    # Defer stdout/stderr/code_snapshot — can be MBs per row, not needed in list
     runs = (
         Run.objects
         .select_related("script", "triggered_by")
@@ -25,22 +39,18 @@ def run_list_view(request: HttpRequest) -> HttpResponse:
         .order_by("-created_at")
     )
 
-    # Filter by status
     status_filter = request.GET.get("status")
     if status_filter and status_filter in dict(Run.Status.choices):
         runs = runs.filter(status=status_filter)
 
-    # Filter by script
     script_filter = request.GET.get("script")
     if script_filter:
         runs = runs.filter(script_id=script_filter)
 
-    # Paginate — 50 rows per page
     paginator = Paginator(runs, 50)
     page_number = request.GET.get("page", 1)
     page_obj = paginator.get_page(page_number)
 
-    # Scripts for filter dropdown (name + pk only)
     scripts = Script.objects.only("pk", "name").order_by("name")
 
     return render(request, "cpanel/runs/list.html", {
@@ -57,27 +67,98 @@ def run_list_view(request: HttpRequest) -> HttpResponse:
 @login_required
 def run_detail_view(request: HttpRequest, pk) -> HttpResponse:
     """View run details including output."""
+    # Defer the heavy code_snapshot by default; load lazily if template
+    # requests it. stdout/stderr we DO need, but if they're spooled the
+    # DB row only has a preview anyway.
     run = get_object_or_404(
         Run.objects.select_related("script", "triggered_by"),
         pk=pk
     )
-    return render(request, "cpanel/runs/detail.html", {"run": run})
+    return render(request, "cpanel/runs/detail.html", {
+        "run": run,
+        "output_spool_threshold": getattr(settings, "OUTPUT_SPOOL_THRESHOLD", 4 * 1024 * 1024),
+    })
+
+
+@login_required
+@require_GET
+def run_output_stream_view(request: HttpRequest, pk, stream: str) -> HttpResponse:
+    """
+    Stream a slice of a run's stdout or stderr.
+
+    Query params:
+        start: byte offset (default 0)
+        end:   byte offset (exclusive; default = start + 256KB)
+
+    Returns:
+        200 StreamingHttpResponse with raw bytes
+        404 if run/stream not found
+    """
+    if stream not in ("stdout", "stderr"):
+        raise Http404("Invalid stream name")
+
+    run = get_object_or_404(Run, pk=pk)
+
+    try:
+        start = max(0, int(request.GET.get("start", 0)))
+        chunk_size = min(
+            4 * 1024 * 1024,
+            max(1, int(request.GET.get("chunk_size", 256 * 1024))),
+        )
+        end_param = request.GET.get("end")
+        end = int(end_param) if end_param else start + chunk_size
+    except ValueError:
+        return JsonResponse({"error": "Invalid start/end/chunk_size"}, status=400)
+
+    # If the output is spooled, read from disk; otherwise read from DB.
+    is_spooled = (stream == "stdout" and run.stdout_spooled) or (
+        stream == "stderr" and run.stderr_spooled
+    )
+
+    if is_spooled:
+        data, total, exists = OutputStorageService.read_stream(run.id, stream, start, end)
+        if not exists:
+            raise Http404("Spool file missing")
+    else:
+        text = run.stdout if stream == "stdout" else run.stderr
+        encoded = (text or "").encode("utf-8", errors="replace")
+        total = len(encoded)
+        data = encoded[start:end]
+
+    def _iter():
+        yield data
+
+    resp = StreamingHttpResponse(_iter(), content_type="application/octet-stream")
+    resp["X-Total-Size"] = str(total)
+    resp["X-Spooled"] = "1" if is_spooled else "0"
+    resp["Content-Length"] = str(len(data))
+    resp["Content-Range"] = f"bytes {start}-{start + len(data) - 1}/{total}"
+    return resp
 
 
 @login_required
 @require_POST
 def run_clear_view(request: HttpRequest) -> HttpResponse:
-    """Delete runs — all or filtered by status/age."""
+    """Delete runs — all or filtered by status/age. Also cleans spool files."""
     mode = request.POST.get("mode", "all")
 
     if mode == "all":
+        # Collect IDs first so we can clean spool files
+        run_ids = list(Run.objects.values_list("id", flat=True))
         count, _ = Run.objects.all().delete()
+        for rid in run_ids:
+            OutputStorageService.delete_for_run(rid)
         messages.success(request, f"Deleted {count} runs.")
 
     elif mode == "status":
         status = request.POST.get("status")
         if status and status in dict(Run.Status.choices):
+            run_ids = list(
+                Run.objects.filter(status=status).values_list("id", flat=True)
+            )
             count, _ = Run.objects.filter(status=status).delete()
+            for rid in run_ids:
+                OutputStorageService.delete_for_run(rid)
             messages.success(request, f"Deleted {count} {status} runs.")
         else:
             messages.error(request, "Invalid status.")
@@ -87,7 +168,12 @@ def run_clear_view(request: HttpRequest) -> HttpResponse:
         from datetime import timedelta
         days = int(request.POST.get("days", 30))
         cutoff = timezone.now() - timedelta(days=days)
+        run_ids = list(
+            Run.objects.filter(created_at__lt=cutoff).values_list("id", flat=True)
+        )
         count, _ = Run.objects.filter(created_at__lt=cutoff).delete()
+        for rid in run_ids:
+            OutputStorageService.delete_for_run(rid)
         messages.success(request, f"Deleted {count} runs older than {days} days.")
 
     else:
@@ -151,4 +237,3 @@ def run_stop_view(request: HttpRequest, pk) -> JsonResponse:
         "killed": killed,
         "message": "Run stopped successfully.",
     })
-
