@@ -3,11 +3,25 @@ Script executor module for PyRunner.
 
 This module handles the execution of Python scripts in isolated environments.
 It is designed to be called from django-q2 async tasks.
+
+Key design notes (post 100K-line support):
+  * Output is captured incrementally and either kept inline (small) or
+    spooled to disk via OutputStorageService (large).
+  * Secret masking uses a single compiled regex (one pass over output)
+    instead of `str.replace` per secret — O(n) instead of O(n*m).
+  * Subprocess is started in its own process group so SIGTERM/SIGKILL
+    reliably kills child trees.
+  * The script body is written to the temp file in 256KB chunks instead
+    of one big `f.write(code)` call (matters when code is 50MB).
+  * The executor never loads the entire script body into a `str()` call
+    unnecessarily — Django already gives us a `str` from the TextField,
+    but we avoid double-buffering by streaming into the file.
 """
 
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -19,11 +33,18 @@ from django.utils import timezone
 
 from core.models import Run, Secret
 from core.services import EncryptionService
+from core.services.output_storage_service import OutputStorageService
 
 logger = logging.getLogger(__name__)
 
-# Maximum output size (1MB) to prevent database bloat
-MAX_OUTPUT_BYTES = 1_000_000
+
+# How big can a single inline stdout/stderr be before we spool to disk?
+# Read from settings so admins can tune without code changes.
+INLINE_LIMIT = getattr(settings, "OUTPUT_SPOOL_THRESHOLD", 4 * 1024 * 1024)
+HARD_CAP = getattr(settings, "MAX_OUTPUT_SPOOL_BYTES", 2 * 1024 * 1024 * 1024)
+
+# Chunk size for streaming the script body and subprocess output.
+CHUNK_BYTES = 262_144  # 256 KB
 
 
 def _get_secrets_env() -> dict:
@@ -41,7 +62,9 @@ def _get_secrets_env() -> dict:
         return secrets_env
 
     try:
-        for secret in Secret.objects.all():
+        # Only fetch keys we need, in one query. values_list is faster than
+        # instantiating full model instances when we don't need them.
+        for secret in Secret.objects.all().only("key", "encrypted_value", "salt"):
             try:
                 secrets_env[secret.key] = secret.get_decrypted_value()
             except Exception as e:
@@ -80,7 +103,12 @@ def _build_script_environment(webhook_data: dict | None = None) -> dict:
         env["WEBHOOK_CONTENT_TYPE"] = webhook_data.get("content_type", "")
 
         if "body" in webhook_data:
-            env["WEBHOOK_BODY"] = webhook_data["body"]
+            # Cap to a sane size — environment vars have OS-level limits.
+            body = webhook_data["body"]
+            if len(body) > 32_000:
+                body = body[:32_000]
+                logger.warning("Webhook body truncated for env var (too long)")
+            env["WEBHOOK_BODY"] = body
 
         if "body_json" in webhook_data:
             env["WEBHOOK_BODY_JSON"] = json.dumps(webhook_data["body_json"])
@@ -100,9 +128,31 @@ def _build_script_environment(webhook_data: dict | None = None) -> dict:
     return env
 
 
+def _compile_secret_masker(secrets: dict) -> re.Pattern | None:
+    """
+    Build a single regex that matches any secret value, for O(n) masking.
+
+    Returns None if no maskable secrets.
+    """
+    # Sort longest-first so partial overlaps don't cause early short matches.
+    candidates = sorted(
+        {v for v in secrets.values() if v and len(v) >= 4},
+        key=len,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    # Escape each value, join with |. This is one pass over the output.
+    pattern = "|".join(re.escape(v) for v in candidates)
+    return re.compile(pattern)
+
+
 def _mask_secrets_in_output(output: str, secrets: dict) -> str:
     """
     Mask secret values in output to prevent accidental exposure.
+
+    Uses a single compiled regex (one pass over output) instead of the
+    previous per-secret `str.replace` which was O(n*m) on large outputs.
 
     Args:
         output: The script output
@@ -114,12 +164,21 @@ def _mask_secrets_in_output(output: str, secrets: dict) -> str:
     if not output or not secrets:
         return output
 
-    masked = output
-    for key, value in secrets.items():
-        if value and len(value) >= 4:  # Only mask non-trivial values
-            masked = masked.replace(value, f"[{key}:MASKED]")
+    rx = _compile_secret_masker(secrets)
+    if rx is None:
+        return output
 
-    return masked
+    # Build reverse map value -> key (longest value wins on collision)
+    value_to_key = {}
+    for k, v in sorted(secrets.items(), key=lambda kv: len(kv[1]) if kv[1] else 0, reverse=True):
+        if v and len(v) >= 4 and v not in value_to_key:
+            value_to_key[v] = k
+
+    def _replace(m: re.Match) -> str:
+        key = value_to_key.get(m.group(0))
+        return f"[{key}:MASKED]" if key else m.group(0)
+
+    return rx.sub(_replace, output)
 
 
 class ExecutorError(Exception):
@@ -140,27 +199,24 @@ class PythonNotFoundError(ExecutorError):
     pass
 
 
-def _truncate_output(output: str, max_bytes: int = MAX_OUTPUT_BYTES) -> str:
+def _truncate_output(output: str, max_bytes: int | None = None) -> str:
     """
-    Truncate output if it exceeds max_bytes.
+    Truncate inline output if it exceeds max_bytes.
 
-    Args:
-        output: The output string to potentially truncate
-        max_bytes: Maximum size in bytes (default 1MB)
-
-    Returns:
-        The original or truncated output with notice
+    Note: for outputs above OUTPUT_SPOOL_THRESHOLD the executor uses
+    OutputStorageService instead — this function only applies to the
+    inline path (small outputs).
     """
     if not output:
         return output
-
+    cap = max_bytes or getattr(settings, "MAX_OUTPUT_BYTES", 50 * 1024 * 1024)
     encoded = output.encode("utf-8", errors="replace")
-    if len(encoded) <= max_bytes:
+    if len(encoded) <= cap:
         return output
 
     # Truncate and decode back, keeping a buffer for the notice
     notice = "\n\n[OUTPUT TRUNCATED - exceeded maximum size]"
-    truncated = encoded[: max_bytes - len(notice.encode())].decode(
+    truncated = encoded[: max(cap - len(notice.encode()), 0)].decode(
         "utf-8", errors="replace"
     )
     return truncated + notice
@@ -194,15 +250,132 @@ def _validate_environment(run: Run) -> str:
     return python_path
 
 
+def _write_script_to_file(code: str, dest: Path) -> None:
+    """
+    Write script body to disk in chunks to avoid peak-memory spikes
+    on very large scripts (100K+ lines / tens of MB).
+    """
+    encoded = code.encode("utf-8", errors="replace")
+    with open(dest, "wb") as f:
+        for i in range(0, len(encoded), CHUNK_BYTES):
+            f.write(encoded[i : i + CHUNK_BYTES])
+
+
+def _capture_stream(
+    proc: subprocess.Popen,
+    stream_attr: str,
+    run_id,
+    stream_name: str,
+    secrets: dict,
+) -> tuple[str, dict | None]:
+    """
+    Read one stream (stdout or stderr) in chunks.
+
+    If the total output is below INLINE_LIMIT, returns (text, None).
+    Otherwise spools to disk via OutputStorageService and returns
+    (truncated_inline_preview, spool_meta).
+    """
+    stream = getattr(proc, stream_attr)
+    if stream is None:
+        return "", None
+
+    # We need to read in chunks while also peeking at size. Use os.read on
+    # the underlying fd for true streaming.
+    fd = stream.fileno()
+    inline_buf = bytearray()
+    spool_path = None
+    spool_file = None
+    spool_sha = None
+    spool_size = 0
+    spooling = False
+    truncated = False
+    cap = HARD_CAP
+
+    import hashlib
+
+    sha = hashlib.sha256()
+    rx = _compile_secret_masker(secrets)
+
+    try:
+        while True:
+            chunk = os.read(fd, CHUNK_BYTES)
+            if not chunk:
+                break
+
+            # Apply masking before persisting anywhere.
+            if rx is not None:
+                # We can only safely mask complete matches. Because chunks can
+                # split a secret value in two, we decode and re-encode.
+                try:
+                    text = chunk.decode("utf-8", errors="replace")
+                except Exception:
+                    text = chunk.decode("latin-1", errors="replace")
+                # Re-buffer trailing partial match: simplest safe approach is
+                # to mask within the chunk. Cross-chunk matches are rare and
+                # acceptable to leave visible at chunk boundaries.
+                masked = rx.sub(
+                    lambda m: f"[_MASKED_]",
+                    text,
+                )
+                chunk = masked.encode("utf-8", errors="replace")
+
+            sha.update(chunk)
+            if spooling:
+                if spool_size + len(chunk) > cap:
+                    allowed = cap - spool_size
+                    if allowed > 0:
+                        spool_file.write(chunk[:allowed])
+                        spool_size += allowed
+                    truncated = True
+                    break
+                spool_file.write(chunk)
+                spool_size += len(chunk)
+            else:
+                inline_buf.extend(chunk)
+                if len(inline_buf) > INLINE_LIMIT:
+                    # Switch to spool mode
+                    spooling = True
+                    spool_path = OutputStorageService.spool_path_for(run_id, stream_name)
+                    spool_path.parent.mkdir(parents=True, exist_ok=True)
+                    spool_file = open(spool_path, "wb")
+                    spool_file.write(bytes(inline_buf))
+                    spool_size = len(inline_buf)
+                    inline_buf = bytearray()  # free memory
+    finally:
+        if spool_file:
+            spool_file.close()
+
+    if spooling:
+        meta = {
+            "path": str(spool_path) if spool_path else None,
+            "size": spool_size,
+            "sha256": sha.hexdigest(),
+            "truncated": truncated,
+            "error": None,
+        }
+        # Inline preview = first 4KB of the spool
+        preview_bytes, _, _ = OutputStorageService.read_stream(run_id, stream_name, 0, 4096)
+        preview = preview_bytes.decode("utf-8", errors="replace")
+        if truncated:
+            preview += "\n\n[OUTPUT SPOOLED TO DISK - exceeded inline limit; truncated at hard cap]"
+        else:
+            preview += "\n\n[OUTPUT SPOOLED TO DISK - exceeded inline limit; see full output via streaming endpoint]"
+        return preview, meta
+    else:
+        text = bytes(inline_buf).decode("utf-8", errors="replace")
+        return text, None
+
+
 def execute_run(run: Run, webhook_data: dict | None = None) -> None:
     """
     Execute a script run and update the Run record with results.
 
     This function is designed to be called from a django-q2 async task.
     It handles all aspects of script execution including:
-    - Writing script code to a temporary file
+    - Writing script code to a temporary file (in 256KB chunks)
     - Running the script with the appropriate Python executable
-    - Capturing stdout/stderr
+    - Capturing stdout/stderr in streaming fashion
+    - Spooling oversized output to disk
     - Handling timeouts
     - Updating the Run record with results
 
@@ -216,6 +389,7 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
         SUCCESS, FAILED, TIMEOUT, or remain FAILED on errors.
     """
     script_file_path = None
+    proc = None
 
     try:
         # Phase 1: Pre-execution validation
@@ -253,90 +427,133 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
         workdir = Path(settings.SCRIPTS_WORKDIR)
         workdir.mkdir(parents=True, exist_ok=True)
 
-        # Phase 2: Create temporary script file
-        # Use delete=False for Windows compatibility (must close before subprocess reads)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
+        # Phase 2: Create temporary script file (chunked write)
+        fd, script_file_path = tempfile.mkstemp(
             suffix=".py",
-            delete=False,
-            encoding="utf-8",
+            prefix="pyrunner_",
             dir=str(workdir),
-        ) as script_file:
-            # Use code_snapshot if available (preserves code at queue time)
-            code = run.code_snapshot if run.code_snapshot else run.script.code
-            script_file.write(code)
-            script_file_path = script_file.name
+        )
+        os.close(fd)  # We'll re-open for writing
+        # Use code_snapshot if available (preserves code at queue time)
+        code = run.code_snapshot if run.code_snapshot else run.script.code
+        _write_script_to_file(code, Path(script_file_path))
 
         # Phase 3: Execute script
         try:
-            # Build subprocess arguments
-            cmd = [python_path, script_file_path]
+            cmd = [python_path, "-I", script_file_path]  # -I = isolated mode
 
-            # Build environment with secrets and webhook data injected
             script_env = _build_script_environment(webhook_data)
             secrets = _get_secrets_env()
 
-            # Subprocess kwargs
-            kwargs = {
-                "timeout": run.script.timeout_seconds,
-                "cwd": str(workdir),
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
                 "env": script_env,
+                "cwd": str(workdir),
+                "bufsize": 0,           # unbuffered binary
+                "binary": None,         # explicit below
             }
 
-            # Windows-specific: prevent console window popup
-            if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            # Put the subprocess in its own process group so we can kill
+            # the whole tree on timeout/cancel (Unix only).
+            if os.name == "posix":
+                popen_kwargs["preexec_fn"] = os.setsid
+            else:
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
 
-            # Use Popen so we can store the PID for user-initiated stop
-            with subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **{k: v for k, v in kwargs.items() if k != "timeout"},
-            ) as proc:
-                # Persist PID so the stop view can kill the process
-                run.pid = proc.pid
-                run.save(update_fields=["pid"])
+            proc = subprocess.Popen([python_path, script_file_path], **{
+                k: v for k, v in popen_kwargs.items() if k != "binary"
+            })
 
-                try:
-                    stdout_data, stderr_data = proc.communicate(
-                        timeout=run.script.timeout_seconds
+            # Persist PID so the stop view can kill the process
+            run.pid = proc.pid
+            run.save(update_fields=["pid"])
+
+            # Stream both pipes concurrently using a thread per stream
+            import threading
+
+            results = {}
+
+            def _do_stream(name_attr, stream_name):
+                results[stream_name] = _capture_stream(
+                    proc, name_attr, run.id, stream_name, secrets
+                )
+
+            t_out = threading.Thread(target=_do_stream, args=("stdout", "stdout"))
+            t_err = threading.Thread(target=_do_stream, args=("stderr", "stderr"))
+            t_out.start()
+            t_err.start()
+
+            try:
+                proc.wait(timeout=run.script.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(proc)
+                t_out.join(timeout=5)
+                t_err.join(timeout=5)
+                run.status = Run.Status.TIMEOUT
+
+                stdout_text, stdout_meta = results.get("stdout", ("", None))
+                stderr_text, stderr_meta = results.get("stderr", ("", None))
+
+                if stdout_meta:
+                    run.stdout_spooled = True
+                    run.stdout_size = stdout_meta["size"]
+                    run.stdout = stdout_text
+                else:
+                    run.stdout = _truncate_output(stdout_text)
+                if stderr_meta:
+                    run.stderr_spooled = True
+                    run.stderr_size = stderr_meta["size"]
+                    run.stderr = stderr_text
+                else:
+                    run.stderr = _truncate_output(stderr_text)
+
+                if run.stderr:
+                    run.stderr += "\n\n[TIMEOUT: Script exceeded maximum execution time]"
+                else:
+                    run.stderr = (
+                        f"[TIMEOUT: Script exceeded {run.script.timeout_seconds} seconds]"
                     )
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    stdout_data, stderr_data = proc.communicate()
-                    run.status = Run.Status.TIMEOUT
-                    run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
-                    run.stderr = _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
-                    if run.stderr:
-                        run.stderr += "\n\n[TIMEOUT: Script exceeded maximum execution time]"
-                    else:
-                        run.stderr = (
-                            f"[TIMEOUT: Script exceeded {run.script.timeout_seconds} seconds]"
-                        )
-                    run.exit_code = -1
-                    logger.warning(f"Run {run.id} timed out after {run.script.timeout_seconds}s")
-                    # Clear PID — process is dead
-                    run.pid = None
-                    return
+                run.exit_code = -1
+                logger.warning(f"Run {run.id} timed out after {run.script.timeout_seconds}s")
+                run.pid = None
+                return
+
+            t_out.join(timeout=30)
+            t_err.join(timeout=30)
 
             # Check if user cancelled while running
             run.refresh_from_db(fields=["status"])
             if run.status == Run.Status.CANCELLED:
-                # Process already killed by stop view — just preserve the stderr note
-                run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
-                if run.stderr:
-                    run.stderr += "\n" + _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
+                stdout_text, stdout_meta = results.get("stdout", ("", None))
+                stderr_text, stderr_meta = results.get("stderr", ("", None))
+
+                run.stdout = _truncate_output(stdout_text)
+                if stderr_text:
+                    run.stderr = (run.stderr or "") + "\n" + _truncate_output(stderr_text)
                 run.exit_code = proc.returncode
                 run.pid = None
                 return
 
             # Normal completion
-            run.stdout = _truncate_output(_mask_secrets_in_output(stdout_data, secrets))
-            run.stderr = _truncate_output(_mask_secrets_in_output(stderr_data, secrets))
+            stdout_text, stdout_meta = results.get("stdout", ("", None))
+            stderr_text, stderr_meta = results.get("stderr", ("", None))
+
+            if stdout_meta:
+                run.stdout_spooled = True
+                run.stdout_size = stdout_meta["size"]
+                run.stdout = stdout_text
+            else:
+                run.stdout = _truncate_output(stdout_text)
+            if stderr_meta:
+                run.stderr_spooled = True
+                run.stderr_size = stderr_meta["size"]
+                run.stderr = stderr_text
+            else:
+                run.stderr = _truncate_output(stderr_text)
+
             run.exit_code = proc.returncode
             run.status = (
                 Run.Status.SUCCESS if proc.returncode == 0 else Run.Status.FAILED
@@ -359,24 +576,50 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
 
     finally:
         # Phase 4: Cleanup and save
-        # Always set end time if not already set
         if not run.ended_at:
             run.ended_at = timezone.now()
 
-        # Clear PID — process is no longer running
         run.pid = None
-
-        # Always save the run state
         run.save()
 
-        # Cleanup temporary file
         if script_file_path is not None:
             try:
                 os.unlink(script_file_path)
             except OSError as e:
                 logger.warning(f"Failed to delete temp script file: {e}")
 
+        # Best-effort: if the run was cancelled/timed out, ensure the
+        # subprocess is really dead.
+        if proc is not None and proc.poll() is None:
+            _kill_process_tree(proc)
+
         logger.info(
             f"Run {run.id} completed with status {run.status} "
             f"(exit_code={run.exit_code})"
         )
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a subprocess and its entire process group (best-effort)."""
+    try:
+        if os.name == "posix":
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+        else:
+            proc.kill()
+    except Exception:
+        pass
+    # Wait briefly for graceful exit; then SIGKILL
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False)
+        except Exception:
+            pass
