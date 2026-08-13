@@ -1,0 +1,369 @@
+"""
+Global application settings model.
+"""
+
+from django.conf import settings
+from django.db import models
+
+
+class GlobalSettings(models.Model):
+    """
+    Singleton model for global application settings.
+    Uses get_solo pattern - always ID=1.
+    """
+
+    class EmailBackend(models.TextChoices):
+        DISABLED = "disabled", "Disabled"
+        SMTP = "smtp", "SMTP"
+        RESEND = "resend", "Resend API"
+
+    # Schedule settings
+    schedules_paused = models.BooleanField(
+        default=False,
+        help_text="Global pause for all scheduled script executions",
+    )
+
+    schedules_paused_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When schedules were paused",
+    )
+
+    schedules_paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Email notification settings
+    email_backend = models.CharField(
+        max_length=20,
+        choices=EmailBackend.choices,
+        default=EmailBackend.DISABLED,
+        help_text="Email backend for notifications",
+    )
+
+    # SMTP configuration
+    smtp_host = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="SMTP server hostname",
+    )
+    smtp_port = models.PositiveIntegerField(
+        default=587,
+        help_text="SMTP server port",
+    )
+    smtp_username = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="SMTP username",
+    )
+    smtp_password_encrypted = models.TextField(
+        blank=True,
+        help_text="SMTP password (encrypted)",
+    )
+    smtp_use_tls = models.BooleanField(
+        default=True,
+        help_text="Use TLS for SMTP connection",
+    )
+    smtp_from_email = models.EmailField(
+        blank=True,
+        help_text="From email address for SMTP",
+    )
+
+    # Resend configuration
+    resend_api_key_encrypted = models.TextField(
+        blank=True,
+        help_text="Resend API key (encrypted)",
+    )
+    resend_from_email = models.EmailField(
+        blank=True,
+        help_text="From email address for Resend",
+    )
+
+    # Default notification email
+    default_notification_email = models.EmailField(
+        blank=True,
+        help_text="Default email address for all notifications",
+    )
+
+    # General Settings
+    instance_name = models.CharField(
+        max_length=100,
+        default="PyRunner",
+        blank=True,
+        help_text="Instance name displayed in header and emails",
+    )
+    timezone = models.CharField(
+        max_length=50,
+        default="UTC",
+        help_text="Default timezone for the instance",
+    )
+
+    class DateFormat(models.TextChoices):
+        ISO = "YYYY-MM-DD", "YYYY-MM-DD (ISO)"
+        US = "MM/DD/YYYY", "MM/DD/YYYY (US)"
+        EU = "DD/MM/YYYY", "DD/MM/YYYY (EU)"
+        DOT = "DD.MM.YYYY", "DD.MM.YYYY"
+
+    date_format = models.CharField(
+        max_length=20,
+        choices=DateFormat.choices,
+        default=DateFormat.ISO,
+        help_text="Date display format",
+    )
+
+    class TimeFormat(models.TextChoices):
+        H24 = "24h", "24-hour"
+        H12 = "12h", "12-hour"
+
+    time_format = models.CharField(
+        max_length=10,
+        choices=TimeFormat.choices,
+        default=TimeFormat.H24,
+        help_text="Time display format",
+    )
+
+    # Security Settings
+    admin_url_slug = models.CharField(
+        max_length=100,
+        default="django-admin",
+        help_text="URL path for Django admin interface (requires restart)",
+    )
+
+    # Log Retention Settings
+    retention_days = models.PositiveIntegerField(
+        default=0,
+        help_text="Delete runs older than X days (0 = keep forever)",
+    )
+    retention_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Keep last X runs per script (0 = unlimited)",
+    )
+    auto_cleanup_enabled = models.BooleanField(
+        default=False,
+        help_text="Automatically clean up old runs daily",
+    )
+    last_cleanup_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the last cleanup was performed",
+    )
+
+    # Worker heartbeat for status detection
+    worker_heartbeat_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last heartbeat from django-q workers",
+    )
+
+    # Worker Settings (Q_CLUSTER configuration)
+    q_workers = models.PositiveIntegerField(
+        default=4,
+        help_text="Number of worker processes for task queue",
+    )
+    q_timeout = models.PositiveIntegerField(
+        default=600,
+        help_text="Task timeout in seconds (0 for no timeout)",
+    )
+    q_retry = models.PositiveIntegerField(
+        default=660,
+        help_text="Seconds before a task is retried after timeout",
+    )
+    q_queue_limit = models.PositiveIntegerField(
+        default=20,
+        help_text="Maximum number of tasks in the queue",
+    )
+
+    # GOAT STRATEGY: lets you run 3-4 workers for throughput on small/fast
+    # scripts while still bounding total RAM. Any script whose
+    # memory_limit_mb >= heavy_job_threshold_mb must acquire one of
+    # heavy_job_slots before its subprocess starts (see executor.py). Slots
+    # are independent of q_workers — e.g. 4 workers total, but only 1 heavy
+    # (>=512MB) job runs at a time; the other 3 workers stay free for
+    # cheap/fast scripts.
+    heavy_job_threshold_mb = models.PositiveIntegerField(
+        default=512,
+        help_text="Scripts with memory_limit_mb at/above this are 'heavy' and gated by heavy_job_slots",
+    )
+    heavy_job_slots = models.PositiveIntegerField(
+        default=3,
+        # ROOT FIX (2026-08): was default=1, but the WP-side dispatch gate
+        # (ELITEX_DL_MAX_CONCURRENT_PER_TOOL in elitex-download-manager.php)
+        # already assumes 3 concurrent heavy jobs per tool. With slots=1,
+        # the 2nd/3rd job that passed the WP gate would sit here polling
+        # _acquire_heavy_slot() for up to the script's full timeout without
+        # ever claiming its WP job row -> WP job invisibly stuck 'pending'.
+        # Keep these two numbers in sync if either side changes.
+        help_text="Max number of 'heavy' scripts allowed to run concurrently, regardless of worker count",
+    )
+    heavy_job_running_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Internal counter of currently-running heavy jobs (managed by executor.py)",
+    )
+    worker_settings_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When worker settings were last updated (requires restart)",
+    )
+
+    # Setup wizard tracking
+    setup_completed = models.BooleanField(
+        default=False,
+        help_text="Whether initial setup has been completed",
+    )
+    setup_completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the initial setup was completed",
+    )
+
+    # Registration control
+    allow_registration = models.BooleanField(
+        default=True,
+        help_text="Allow new users to register without an invite (auto-disabled after first user)",
+    )
+
+    # S3 Storage Configuration
+    s3_enabled = models.BooleanField(
+        default=False,
+        help_text="Enable S3-compatible storage for backups",
+    )
+    s3_endpoint_url = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="S3 endpoint URL (leave empty for AWS S3)",
+    )
+    s3_region = models.CharField(
+        max_length=50,
+        blank=True,
+        default="us-east-1",
+        help_text="S3 region",
+    )
+    s3_bucket_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="S3 bucket name",
+    )
+    s3_access_key_encrypted = models.TextField(
+        blank=True,
+        help_text="S3 access key (encrypted)",
+    )
+    s3_secret_key_encrypted = models.TextField(
+        blank=True,
+        help_text="S3 secret key (encrypted)",
+    )
+    s3_use_ssl = models.BooleanField(
+        default=True,
+        help_text="Use SSL/TLS for S3 connections",
+    )
+    s3_path_style = models.BooleanField(
+        default=False,
+        help_text="Use path-style addressing (required for MinIO)",
+    )
+    s3_last_tested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When S3 connection was last successfully tested",
+    )
+
+    # S3 Scheduled Backup Configuration
+    class S3BackupSchedule(models.TextChoices):
+        DISABLED = "disabled", "Disabled"
+        DAILY = "daily", "Daily"
+        WEEKLY = "weekly", "Weekly"
+
+    s3_backup_enabled = models.BooleanField(
+        default=False,
+        help_text="Enable scheduled backups to S3",
+    )
+    s3_backup_schedule = models.CharField(
+        max_length=20,
+        choices=S3BackupSchedule.choices,
+        default=S3BackupSchedule.DISABLED,
+        help_text="Backup schedule frequency",
+    )
+    s3_backup_time = models.TimeField(
+        default="02:00",
+        help_text="Time of day to run backup (in instance timezone)",
+    )
+    s3_backup_day = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Day of week for weekly backups (0=Monday, 6=Sunday)",
+    )
+    s3_backup_prefix = models.CharField(
+        max_length=255,
+        blank=True,
+        default="pyrunner-backups/",
+        help_text="S3 key prefix for backup files",
+    )
+    s3_backup_retention_count = models.PositiveIntegerField(
+        default=7,
+        help_text="Number of backups to keep in S3 (0 = keep all)",
+    )
+
+    # Backup content options
+    s3_backup_include_runs = models.BooleanField(
+        default=False,
+        help_text="Include run history in scheduled backups",
+    )
+    s3_backup_max_runs = models.PositiveIntegerField(
+        default=1000,
+        help_text="Maximum runs to include in backup",
+    )
+    s3_backup_include_datastores = models.BooleanField(
+        default=True,
+        help_text="Include datastores in scheduled backups",
+    )
+
+    # Backup tracking fields
+    s3_backup_last_run_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the last scheduled backup ran",
+    )
+    s3_backup_last_status = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Status of last backup (success/failed)",
+    )
+    s3_backup_last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Error message from last failed backup",
+    )
+    s3_backup_last_size = models.PositiveIntegerField(
+        default=0,
+        help_text="Size of last backup in bytes",
+    )
+
+    class Meta:
+        db_table = "global_settings"
+        verbose_name = "global settings"
+        verbose_name_plural = "global settings"
+
+    def __str__(self):
+        status = "paused" if self.schedules_paused else "active"
+        return f"Global Settings (schedules: {status})"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton pattern
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings instance."""
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def worker_restart_required(self) -> bool:
+        """Check if worker restart is required due to pending settings changes."""
+        if not self.worker_settings_updated_at or not self.worker_heartbeat_at:
+            return False
+        return self.worker_settings_updated_at > self.worker_heartbeat_at

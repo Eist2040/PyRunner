@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+
+{% block title %}Runs - PyRunner{% endblock %}
+
+{% block content %}
+<div class="flex">
+    {% include "cpanel/_sidebar.html" %}
+
+    <div class="flex-1 p-8">
+        <!-- Header -->
+        <div class="mb-8 flex items-start justify-between">
+            <div>
+                <h1 class="text-2xl font-bold text-code-text">Runs</h1>
+                <p class="text-code-muted">Execution history for all scripts
+                    {% if paginator.count %}<span class="ml-1">({{ paginator.count }} total)</span>{% endif %}
+                </p>
+            </div>
+            <!-- Clear Runs -->
+            <div class="flex items-center gap-2">
+                <button onclick="document.getElementById('clear-modal').classList.remove('hidden')"
+                        class="px-4 py-2 text-sm bg-code-red/10 hover:bg-code-red/20 text-code-red border border-code-red/30 rounded-lg transition-colors">
+                    Clear Runs
+                </button>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="mb-6 flex flex-wrap items-center gap-4">
+            <div class="flex items-center space-x-2">
+                <span class="text-code-muted text-sm">Status:</span>
+                <a href="{% url 'cpanel:run_list' %}{% if script_filter %}?script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm rounded-lg transition-colors {% if not status_filter %}bg-code-accent/20 text-code-accent{% else %}text-code-muted hover:text-code-text hover:bg-code-bg{% endif %}">
+                    All
+                </a>
+                {% for value, label in status_choices %}
+                <a href="{% url 'cpanel:run_list' %}?status={{ value }}{% if script_filter %}&script={{ script_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm rounded-lg transition-colors {% if status_filter == value %}{% if value == 'success' %}bg-code-green/20 text-code-green{% elif value == 'failed' or value == 'timeout' %}bg-code-red/20 text-code-red{% elif value == 'running' %}bg-code-yellow/20 text-code-yellow{% else %}bg-code-muted/20 text-code-muted{% endif %}{% else %}text-code-muted hover:text-code-text hover:bg-code-bg{% endif %}">
+                    {{ label }}
+                </a>
+                {% endfor %}
+            </div>
+
+            {% if scripts %}
+            <div class="flex items-center space-x-2">
+                <span class="text-code-muted text-sm">Script:</span>
+                <select onchange="window.location.href='{% url 'cpanel:run_list' %}{% if status_filter %}?status={{ status_filter }}&{% else %}?{% endif %}script=' + this.value"
+                        class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-text focus:outline-none focus:ring-2 focus:ring-code-accent/50">
+                    <option value="">All Scripts</option>
+                    {% for script in scripts %}
+                    <option value="{{ script.pk }}" {% if script_filter == script.pk|stringformat:"s" %}selected{% endif %}>
+                        {{ script.name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+
+            <div class="flex items-center space-x-2">
+                <span class="text-code-muted text-sm">Trigger:</span>
+                <select onchange="window.location.href='{% url 'cpanel:run_list' %}?trigger=' + this.value{% if status_filter %} + '&status={{ status_filter }}'{% endif %}{% if script_filter %} + '&script={{ script_filter }}'{% endif %}"
+                        class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-text focus:outline-none focus:ring-2 focus:ring-code-accent/50">
+                    <option value="">All Triggers</option>
+                    {% for value, label in trigger_choices %}
+                    <option value="{{ value }}" {% if trigger_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="flex items-center space-x-2">
+                <span class="text-code-muted text-sm">Last:</span>
+                <a href="?last=1h{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}{% if trigger_filter %}&trigger={{ trigger_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm rounded-lg transition-colors {% if last_filter == '1h' %}bg-code-accent/20 text-code-accent{% else %}text-code-muted hover:text-code-text hover:bg-code-bg{% endif %}">1h</a>
+                <a href="?last=24h{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}{% if trigger_filter %}&trigger={{ trigger_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm rounded-lg transition-colors {% if last_filter == '24h' %}bg-code-accent/20 text-code-accent{% else %}text-code-muted hover:text-code-text hover:bg-code-bg{% endif %}">24h</a>
+                <a href="?last=7d{% if status_filter %}&status={{ status_filter }}{% endif %}{% if script_filter %}&script={{ script_filter }}{% endif %}{% if trigger_filter %}&trigger={{ trigger_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm rounded-lg transition-colors {% if last_filter == '7d' %}bg-code-accent/20 text-code-accent{% else %}text-code-muted hover:text-code-text hover:bg-code-bg{% endif %}">7d</a>
+            </div>
+
+            <form method="get" class="flex items-center gap-2">
+                {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
+                {% if script_filter %}<input type="hidden" name="script" value="{{ script_filter }}">{% endif %}
+                {% if trigger_filter %}<input type="hidden" name="trigger" value="{{ trigger_filter }}">{% endif %}
+                <span class="text-code-muted text-sm">From:</span>
+                <input type="date" name="date_from" value="{{ date_from }}"
+                       class="px-2 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-text focus:outline-none focus:ring-2 focus:ring-code-accent/50">
+                <span class="text-code-muted text-sm">To:</span>
+                <input type="date" name="date_to" value="{{ date_to }}"
+                       class="px-2 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-text focus:outline-none focus:ring-2 focus:ring-code-accent/50">
+                <button type="submit" class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-text hover:bg-code-accent/10">Apply</button>
+                {% if date_from or date_to or last_filter %}
+                <a href="{% url 'cpanel:run_list' %}{% if status_filter %}?status={{ status_filter }}{% endif %}"
+                   class="px-3 py-1 text-sm text-code-muted hover:text-code-text">Clear dates</a>
+                {% endif %}
+            </form>
+        </div>
+
+        <!-- Runs Table -->
+        {% if runs %}
+        <div class="bg-code-surface border border-code-border rounded-xl overflow-hidden">
+            <table class="w-full">
+                <thead class="bg-code-bg border-b border-code-border">
+                    <tr>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider">Script</th>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider">Status</th>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider">Duration</th>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider">Triggered By</th>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider">Started</th>
+                        <th class="px-6 py-4 text-left text-xs font-semibold text-code-muted uppercase tracking-wider"></th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-code-border">
+                    {% for run in runs %}
+                    <tr class="hover:bg-code-bg/50 transition-colors">
+                        <td class="px-6 py-4">
+                            <a href="{% url 'cpanel:script_detail' pk=run.script.pk %}" class="text-code-accent hover:underline font-medium">
+                                {{ run.script.name }}
+                            </a>
+                        </td>
+                        <td class="px-6 py-4">
+                            {% if run.status == 'success' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-green/20 text-code-green">Success</span>
+                            {% elif run.status == 'failed' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-red/20 text-code-red">Failed</span>
+                            {% elif run.status == 'timeout' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-red/20 text-code-red">Timeout</span>
+                            {% elif run.status == 'running' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-yellow/20 text-code-yellow">Running</span>
+                            {% elif run.status == 'pending' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-muted/20 text-code-muted">Pending</span>
+                            {% elif run.status == 'cancelled' %}
+                            <span class="px-2 py-1 text-xs rounded bg-code-muted/20 text-code-muted">Cancelled</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 text-code-text">
+                            {% if run.duration_display %}{{ run.duration_display }}{% else %}-{% endif %}
+                        </td>
+                        <td class="px-6 py-4 text-code-muted">
+                            {% if run.triggered_by %}{{ run.triggered_by.email }}{% else %}System{% endif %}
+                        </td>
+                        <td class="px-6 py-4 text-code-muted text-sm">
+                            {% if run.started_at %}{{ run.started_at|date:"M d, H:i" }}{% else %}{{ run.created_at|date:"M d, H:i" }}{% endif %}
+                        </td>
+                        <td class="px-6 py-4 text-right">
+                            <div class="flex items-center justify-end gap-2">
+                            {% if run.status == 'running' or run.status == 'pending' %}
+                            <button onclick="stopRun('{{ run.pk }}', this)"
+                                    class="px-2 py-1 text-xs bg-code-red/10 hover:bg-code-red/20 text-code-red border border-code-red/30 rounded transition-colors">
+                                ⏹ Stop
+                            </button>
+                            {% endif %}
+                            <a href="{% url 'cpanel:run_detail' pk=run.pk %}" class="text-code-accent hover:underline text-sm">
+                                View
+                            </a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination -->
+        {% if paginator.num_pages > 1 %}
+        <div class="mt-6 flex items-center justify-between">
+            <p class="text-sm text-code-muted">
+                Page {{ page_obj.number }} of {{ paginator.num_pages }}
+                &nbsp;·&nbsp; {{ paginator.count }} total runs
+            </p>
+            <div class="flex items-center gap-2">
+                {% if page_obj.has_previous %}
+                <a href="?page=1{{ extra_qs }}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">«</a>
+                <a href="?page={{ page_obj.previous_page_number }}{{ extra_qs }}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">‹ Prev</a>
+                {% endif %}
+
+                {% if page_obj.has_next %}
+                <a href="?page={{ page_obj.next_page_number }}{{ extra_qs }}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">Next ›</a>
+                <a href="?page={{ paginator.num_pages }}{{ extra_qs }}"
+                   class="px-3 py-1 text-sm bg-code-bg border border-code-border rounded-lg text-code-muted hover:text-code-text transition-colors">»</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% else %}
+        <div class="bg-code-surface border border-code-border rounded-xl p-12 text-center">
+            <div class="w-16 h-16 bg-code-accent/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg class="w-8 h-8 text-code-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+            </div>
+            <h3 class="text-lg font-semibold text-code-text mb-2">No runs yet</h3>
+            <p class="text-code-muted mb-6">Run a script to see execution history here.</p>
+            <a href="{% url 'cpanel:script_list' %}"
+               class="inline-flex items-center px-4 py-2 bg-code-accent hover:bg-code-accent/90 text-white font-semibold rounded-lg transition-colors">
+                View Scripts
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+const CSRF = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '{{ csrf_token }}';
+function stopRun(runId, btn) {
+    if (!confirm('Stop this run? The process will be killed.')) return;
+    btn.disabled = true;
+    btn.textContent = '…';
+    fetch('/cpanel/runs/' + runId + '/stop/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': CSRF, 'Content-Type': 'application/json' },
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) { location.reload(); }
+        else { alert('Stop failed: ' + (data.error || 'Unknown')); btn.disabled = false; btn.textContent = '⏹ Stop'; }
+    })
+    .catch(() => location.reload());
+}
+</script>
+
+<!-- Clear Runs Modal --><div id="clear-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-code-surface border border-code-border rounded-xl p-6 w-full max-w-md mx-4">
+        <h2 class="text-lg font-bold text-code-text mb-4">Clear Runs</h2>
+        <form method="post" action="{% url 'cpanel:run_clear' %}">
+            {% csrf_token %}
+            <div class="space-y-3 mb-6">
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-border hover:bg-code-bg cursor-pointer">
+                    <input type="radio" name="mode" value="older_than" checked class="text-code-accent">
+                    <div>
+                        <div class="text-code-text text-sm font-medium">Older than N days</div>
+                        <div class="flex items-center gap-2 mt-1">
+                            <input type="number" name="days" value="30" min="1"
+                                   class="w-20 px-2 py-1 text-sm bg-code-bg border border-code-border rounded text-code-text focus:outline-none focus:ring-1 focus:ring-code-accent">
+                            <span class="text-code-muted text-xs">days old</span>
+                        </div>
+                    </div>
+                </label>
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-border hover:bg-code-bg cursor-pointer">
+                    <input type="radio" name="mode" value="status" class="text-code-accent">
+                    <div>
+                        <div class="text-code-text text-sm font-medium">By status</div>
+                        <select name="status" class="mt-1 px-2 py-1 text-sm bg-code-bg border border-code-border rounded text-code-text focus:outline-none">
+                            {% for value, label in status_choices %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </label>
+                <label class="flex items-center gap-3 p-3 rounded-lg border border-code-red/40 hover:bg-code-red/5 cursor-pointer">
+                    <input type="radio" name="mode" value="all" class="text-code-red">
+                    <div>
+                        <div class="text-code-red text-sm font-medium">Delete ALL runs</div>
+                        <div class="text-code-muted text-xs">This cannot be undone</div>
+                    </div>
+                </label>
+            </div>
+            <div class="flex gap-3 justify-end">
+                <button type="button" onclick="document.getElementById('clear-modal').classList.add('hidden')"
+                        class="px-4 py-2 text-sm text-code-muted hover:text-code-text border border-code-border rounded-lg transition-colors">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 text-sm bg-code-red hover:bg-code-red/90 text-white font-semibold rounded-lg transition-colors">
+                    Clear Runs
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
