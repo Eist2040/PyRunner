@@ -8,6 +8,15 @@
 #
 # Storage bind mount: /opt/elitex/storage is shared with WordPress
 # so elitex-dl.php can stream ZIPs directly without volume juggling.
+#
+# SpatialFX upload bind mount: /opt/elitex/spatialfx-uploads is a SEPARATE
+# shared mount (also read-write here) used only by the SpatialFX Deep tier.
+# It's split out from /opt/elitex/storage above because that mount is
+# read_only: true on the WordPress side — WordPress's spatialfx upload
+# handler needs to write source files somewhere PyRunner can also see them,
+# and /opt/elitex/storage can't be that place while it stays read-only there.
+# Set UPLOAD_TMP_PATH = /opt/elitex/spatialfx-uploads in PyRunner secrets
+# for the spatialfx script (STORAGE_PATH stays as-is, unaffected).
 
 services:
   pyrunner:
@@ -40,6 +49,12 @@ services:
       - type: bind
         source: /opt/elitex/storage
         target: /opt/elitex/storage
+      # NEW — shared with WordPress for the SpatialFX Deep tier upload
+      # handoff. See header comment above for why this is a separate mount
+      # from /opt/elitex/storage rather than a subfolder of it.
+      - type: bind
+        source: /opt/elitex/spatialfx-uploads
+        target: /opt/elitex/spatialfx-uploads
     networks:
       - default
       - brain-gateway
